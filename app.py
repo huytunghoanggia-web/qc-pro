@@ -1,448 +1,392 @@
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>QC Print Inspector Pro</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Be+Vietnam+Pro:wght@300;400;500;600&display=swap');
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0d0f14;--s1:#161920;--s2:#1e2230;--border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);--text:#e8eaf0;--muted:#6b7280;--accent:#00e5b3;--accent2:#0099ff;--warn:#ffa733;--danger:#ff4d4d;--success:#00c896;--review:#ffaa00;--mono:'IBM Plex Mono',monospace;--sans:'Be Vietnam Pro',sans-serif}
-html,body{height:100%;overflow-x:hidden}
-body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+import cv2
+import numpy as np
+import base64
+import os
+import requests
+import json
+from io import BytesIO
+from PIL import Image
 
-/* HEADER */
-header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--border);background:var(--s1);flex-shrink:0}
-.logo{width:30px;height:30px;background:var(--accent);border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-header h1{font-size:14px;font-weight:600}
-header p{font-size:11px;color:var(--muted)}
-.badge{margin-left:auto;font-family:var(--mono);font-size:10px;background:rgba(0,229,179,0.12);color:var(--accent);border:1px solid rgba(0,229,179,0.25);padding:2px 8px;border-radius:20px}
+app = Flask(__name__, static_folder='static')
+CORS(app)
 
-/* MAIN LAYOUT */
-.app{display:flex;flex-direction:column;flex:1;padding:16px;gap:14px;max-width:1200px;margin:0 auto;width:100%}
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
-/* UPLOAD SECTION */
-.upload-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:640px){.upload-row{grid-template-columns:1fr}}
+# ─── Helpers ────────────────────────────────────────────────────────────────
 
-.upload-card{background:var(--s1);border:1px solid var(--border);border-radius:12px;overflow:hidden}
-.card-header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
-.dot{width:7px;height:7px;border-radius:50%}
-.dot-gold{background:#f5a623}.dot-blue{background:var(--accent2)}
-.card-title{font-size:11px;font-weight:500;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted)}
-.card-name{font-size:12px;font-weight:600;margin-left:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
+def b64_to_cv2(b64_str):
+    """Decode base64 image to OpenCV BGR array."""
+    data = base64.b64decode(b64_str)
+    arr = np.frombuffer(data, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    return img
 
-.drop-zone{position:relative;min-height:200px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:pointer;padding:20px;transition:background 0.2s;border:2px dashed transparent}
-.drop-zone:hover,.drop-zone.dragover{background:rgba(255,255,255,0.02);border-color:var(--border2)}
-.drop-zone.has-image{padding:0;min-height:0}
-.drop-zone img{width:100%;max-height:260px;object-fit:contain;display:block;background:#000}
-.drop-icon{opacity:0.2}
-.drop-text{font-size:13px;color:var(--muted)}
-.drop-sub{font-size:11px;color:var(--muted);opacity:0.6}
-.drop-btn{font-family:var(--sans);font-size:12px;font-weight:500;padding:6px 16px;background:transparent;border:1px solid var(--border2);border-radius:6px;color:var(--text);cursor:pointer;margin-top:4px;transition:all 0.2s}
-.drop-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(0,229,179,0.06)}
-.img-overlay{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.7));padding:8px 12px;display:flex;align-items:center;gap:8px}
-.img-name{font-size:11px;font-family:var(--mono);color:rgba(255,255,255,0.7);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.change-btn{font-size:10px;font-family:var(--mono);background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:white;padding:2px 8px;cursor:pointer}
+def cv2_to_b64(img):
+    """Encode OpenCV image to base64 PNG."""
+    _, buf = cv2.imencode('.png', img)
+    return base64.b64encode(buf).decode('utf-8')
 
-/* SETTINGS */
-.settings-row{display:flex;align-items:center;gap:16px;background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:12px 16px;flex-wrap:wrap}
-.setting-group{display:flex;align-items:center;gap:10px}
-.setting-label{font-size:12px;color:var(--muted);white-space:nowrap}
-.slider-wrap{display:flex;align-items:center;gap:8px}
-input[type=range]{width:120px;accent-color:var(--accent)}
-.slider-val{font-family:var(--mono);font-size:12px;color:var(--accent);min-width:28px}
-.sens-hint{font-size:11px;color:var(--muted);opacity:0.7}
+def pil_to_b64(pil_img):
+    buf = BytesIO()
+    pil_img.save(buf, format='JPEG', quality=90)
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-/* RUN BUTTON */
-.run-wrap{display:flex;align-items:center;gap:12px}
-.status-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:all 0.3s}
-.status-dot.ready{background:var(--accent);box-shadow:0 0 6px var(--accent)}
-.status-text{font-size:12px;color:var(--muted);flex:1}
-.run-btn{font-family:var(--sans);font-size:13px;font-weight:600;padding:10px 28px;background:var(--accent);border:none;border-radius:8px;color:#000;cursor:pointer;white-space:nowrap;transition:opacity 0.2s,transform 0.1s}
-.run-btn:disabled{opacity:0.3;cursor:not-allowed}
-.run-btn:not(:disabled):hover{opacity:0.88}
-.run-btn:not(:disabled):active{transform:scale(0.98)}
+def resize_keep_aspect(img, max_dim=2000):
+    h, w = img.shape[:2]
+    scale = min(max_dim / w, max_dim / h, 1.0)
+    if scale < 1.0:
+        img = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+    return img
 
-/* RESULTS */
-.results{background:var(--s1);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:none}
-.results.show{display:block}
+# ─── Step 1: Align print to AW using feature matching ───────────────────────
 
-.result-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px}
-.verdict-badge{padding:6px 16px;border-radius:20px;font-size:13px;font-weight:700;letter-spacing:0.05em}
-.v-pass{background:rgba(0,200,150,0.15);color:var(--success);border:1px solid rgba(0,200,150,0.3)}
-.v-fail{background:rgba(255,77,77,0.15);color:var(--danger);border:1px solid rgba(255,77,77,0.3)}
-.v-review{background:rgba(255,170,0,0.15);color:var(--review);border:1px solid rgba(255,170,0,0.3)}
-.result-stats{display:flex;gap:16px;margin-left:auto;flex-wrap:wrap}
-.stat{text-align:center}
-.stat-num{font-size:20px;font-weight:600;font-family:var(--mono)}
-.stat-lbl{font-size:10px;color:var(--muted);letter-spacing:0.03em}
+def align_images(aw_img, print_img):
+    """
+    Align print_img to aw_img using ORB feature matching + homography.
+    Returns aligned print image (same size as aw_img).
+    """
+    aw_gray = cv2.cvtColor(aw_img, cv2.COLOR_BGR2GRAY)
+    pr_gray = cv2.cvtColor(print_img, cv2.COLOR_BGR2GRAY)
 
-.result-images{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}
-@media(max-width:640px){.result-images{grid-template-columns:1fr}}
-.result-img-box{background:var(--bg)}
-.result-img-box img{width:100%;display:block;object-fit:contain;max-height:320px;background:#000;cursor:zoom-in}
-.result-img-lbl{font-size:10px;color:var(--muted);padding:6px 12px;font-family:var(--mono);background:var(--s1);border-bottom:1px solid var(--border)}
+    # Try SIFT first, fall back to ORB
+    try:
+        detector = cv2.SIFT_create(nfeatures=2000)
+        norm = cv2.NORM_L2
+    except Exception:
+        detector = cv2.ORB_create(nfeatures=2000)
+        norm = cv2.NORM_HAMMING
 
-/* LEGEND */
-.legend{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border)}
-.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
-.legend-color{width:10px;height:10px;border-radius:3px;flex-shrink:0}
+    kp1, des1 = detector.detectAndCompute(aw_gray, None)
+    kp2, des2 = detector.detectAndCompute(pr_gray, None)
 
-/* DEFECT LIST */
-.defect-section{padding:16px}
-.defect-section-title{font-size:11px;font-weight:500;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
-.defect-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px}
-.defect-card{background:var(--s2);border-radius:8px;padding:10px 12px;border:1px solid var(--border);display:flex;gap:10px;align-items:flex-start}
-.defect-num{width:24px;height:24px;border-radius:50%;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#000}
-.defect-type{font-size:12px;font-weight:600;margin-bottom:2px}
-.defect-meta{font-size:11px;color:var(--muted);font-family:var(--mono)}
-.sev-high{color:var(--danger)}.sev-medium{color:var(--warn)}.sev-low{color:var(--muted)}
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        # Can't align — return resized print
+        h, w = aw_img.shape[:2]
+        return cv2.resize(print_img, (w, h))
 
-/* AI SUMMARY */
-.ai-section{padding:16px;border-top:1px solid var(--border)}
-.ai-head{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--accent);margin-bottom:10px;letter-spacing:0.04em;text-transform:uppercase}
-.ai-text{font-size:13px;line-height:1.7;color:var(--text);white-space:pre-wrap}
+    bf = cv2.BFMatcher(norm, crossCheck=False)
+    try:
+        matches = bf.knnMatch(des1, des2, k=2)
+        # Lowe's ratio test
+        good = []
+        for m_n in matches:
+            if len(m_n) == 2:
+                m, n = m_n
+                if m.distance < 0.75 * n.distance:
+                    good.append(m)
+    except Exception:
+        good = []
 
-/* LOADING */
-.loading-overlay{position:fixed;inset:0;background:rgba(13,15,20,0.85);backdrop-filter:blur(4px);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:200;gap:16px}
-.loading-overlay.show{display:flex}
-.spinner{width:44px;height:44px;border:3px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.loading-title{font-size:15px;font-weight:500;color:var(--text)}
-.loading-step{font-size:12px;color:var(--muted);font-family:var(--mono)}
+    if len(good) < 8:
+        h, w = aw_img.shape[:2]
+        return cv2.resize(print_img, (w, h))
 
-/* ZOOM MODAL */
-.zoom-modal{position:fixed;inset:0;background:rgba(0,0,0,0.92);display:none;align-items:center;justify-content:center;z-index:300;cursor:zoom-out}
-.zoom-modal.show{display:flex}
-.zoom-modal img{max-width:96vw;max-height:96vh;object-fit:contain}
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
 
-input[type=file]{display:none}
-</style>
-</head>
-<body>
+    H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    if H is None:
+        h, w = aw_img.shape[:2]
+        return cv2.resize(print_img, (w, h))
 
-<header>
-  <div class="logo"><svg width="18" height="18" viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" fill="#000"/><rect x="11" y="2" width="7" height="7" rx="1.5" fill="#000" opacity="0.5"/><rect x="2" y="11" width="7" height="7" rx="1.5" fill="#000" opacity="0.5"/><rect x="11" y="11" width="7" height="7" rx="1.5" fill="#000"/></svg></div>
-  <div><h1>QC Print Inspector Pro</h1><p>Phát hiện hickey, spot, vệt, xước, nhòe — Computer Vision + AI</p></div>
-  <span class="badge">Pro v1.0</span>
-</header>
+    h, w = aw_img.shape[:2]
+    aligned = cv2.warpPerspective(print_img, H, (w, h),
+                                   flags=cv2.INTER_LINEAR,
+                                   borderMode=cv2.BORDER_REPLICATE)
+    return aligned
 
-<div class="app">
+# ─── Step 2: Pixel-level diff and defect detection ──────────────────────────
 
-  <!-- Upload -->
-  <div class="upload-row">
-    <div class="upload-card">
-      <div class="card-header">
-        <div class="dot dot-gold"></div>
-        <span class="card-title">Artwork gốc</span>
-        <span class="card-name" id="aw-name"></span>
-      </div>
-      <div class="drop-zone" id="drop-aw" onclick="triggerFile('aw')" ondragover="onDragOver(event,'aw')" ondragleave="onDragLeave('aw')" ondrop="onDrop(event,'aw')">
-        <svg class="drop-icon" width="44" height="44" viewBox="0 0 48 48" fill="none"><rect x="6" y="8" width="36" height="32" rx="4" stroke="white" stroke-width="2"/><path d="M6 28L15 20L22 26L30 18L42 28" stroke="white" stroke-width="2" stroke-linejoin="round"/><circle cx="32" cy="16" r="4" stroke="white" stroke-width="2"/></svg>
-        <p class="drop-text">Artwork gốc (AW)</p>
-        <span class="drop-sub">PNG, JPG — kéo thả hoặc nhấn chọn</span>
-        <button class="drop-btn" onclick="event.stopPropagation();triggerFile('aw')">Chọn file AW</button>
-      </div>
-    </div>
-    <div class="upload-card">
-      <div class="card-header">
-        <div class="dot dot-blue"></div>
-        <span class="card-title">Tờ in thực tế</span>
-        <span class="card-name" id="print-name"></span>
-      </div>
-      <div class="drop-zone" id="drop-print" onclick="triggerFile('print')" ondragover="onDragOver(event,'print')" ondragleave="onDragLeave('print')" ondrop="onDrop(event,'print')">
-        <svg class="drop-icon" width="44" height="44" viewBox="0 0 48 48" fill="none"><rect x="8" y="14" width="32" height="26" rx="4" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="7" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="3" fill="white" opacity="0.4"/><path d="M18 14L20 10L28 10L30 14" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>
-        <p class="drop-text">Ảnh tờ in thực tế</p>
-        <span class="drop-sub">Chụp rõ nét bằng smartphone — kéo thả hoặc nhấn chọn</span>
-        <button class="drop-btn" onclick="event.stopPropagation();triggerFile('print')">Chọn ảnh / Chụp</button>
-      </div>
-    </div>
-  </div>
+def detect_defects(aw_img, aligned_print, sensitivity=35):
+    """
+    Compare AW and aligned print pixel-by-pixel.
+    Returns list of defect regions with bounding boxes and types.
+    """
+    # Convert to LAB color space (better perceptual diff)
+    aw_lab  = cv2.cvtColor(aw_img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    pr_lab  = cv2.cvtColor(aligned_print, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-  <!-- Settings -->
-  <div class="settings-row">
-    <div class="setting-group">
-      <span class="setting-label">Độ nhạy phát hiện:</span>
-      <div class="slider-wrap">
-        <input type="range" id="sensitivity" min="10" max="80" value="35" step="5" oninput="updateSens()">
-        <span class="slider-val" id="sens-val">35</span>
-      </div>
-      <span class="sens-hint" id="sens-hint">Cân bằng</span>
-    </div>
-    <div class="run-wrap">
-      <div class="status-dot" id="status-dot"></div>
-      <span class="status-text" id="status-text">Tải ảnh AW và tờ in để bắt đầu</span>
-      <button class="run-btn" id="run-btn" disabled onclick="runAnalysis()">Phân tích →</button>
-    </div>
-  </div>
+    # Weighted diff (L channel more important)
+    diff_L = np.abs(aw_lab[:,:,0] - pr_lab[:,:,0]) * 1.5
+    diff_A = np.abs(aw_lab[:,:,1] - pr_lab[:,:,1])
+    diff_B = np.abs(aw_lab[:,:,2] - pr_lab[:,:,2])
+    diff   = (diff_L + diff_A + diff_B) / 3.0
 
-  <!-- Results -->
-  <div class="results" id="results">
-    <div class="result-header">
-      <div class="verdict-badge" id="verdict-badge">—</div>
-      <div class="result-stats" id="result-stats"></div>
-    </div>
-    <div class="result-images">
-      <div class="result-img-box">
-        <div class="result-img-lbl">▪ Tờ in — đã đánh dấu lỗi (nhấn để phóng to)</div>
-        <img id="result-img" src="" onclick="zoomImg(this.src)">
-      </div>
-      <div class="result-img-box">
-        <div class="result-img-lbl">▪ Bản đồ sai khác (diff map)</div>
-        <img id="diff-img" src="" onclick="zoomImg(this.src)">
-      </div>
-    </div>
-    <div class="legend" id="legend"></div>
-    <div class="defect-section" id="defect-section" style="display:none">
-      <div class="defect-section-title">Chi tiết từng lỗi phát hiện</div>
-      <div class="defect-grid" id="defect-grid"></div>
-    </div>
-    <div class="ai-section" id="ai-section" style="display:none">
-      <div class="ai-head"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M6 4v4M4 6h4" stroke="currentColor" stroke-width="1.5"/></svg>Nhận xét AI</div>
-      <div class="ai-text" id="ai-text"></div>
-    </div>
-  </div>
+    # Threshold
+    thresh = (diff > sensitivity).astype(np.uint8) * 255
 
-</div>
+    # Remove noise with morphological ops
+    kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN,  kernel_open)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
 
-<!-- Loading -->
-<div class="loading-overlay" id="loading">
-  <div class="spinner"></div>
-  <div class="loading-title" id="loading-title">Đang xử lý...</div>
-  <div class="loading-step" id="loading-step">Khởi tạo</div>
-</div>
+    # Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-<!-- Zoom -->
-<div class="zoom-modal" id="zoom-modal" onclick="closeZoom()">
-  <img id="zoom-img" src="">
-</div>
+    h, w = aw_img.shape[:2]
+    total_area = h * w
+    defects = []
 
-<input type="file" id="file-aw"    accept="image/*" onchange="loadFile(event,'aw')">
-<input type="file" id="file-print" accept="image/*" capture="environment" onchange="loadFile(event,'print')">
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 20:  # ignore tiny noise
+            continue
 
-<script>
-const imgs = { aw: null, print: null };
+        x, y, bw, bh = cv2.boundingRect(cnt)
 
-const DEFECT_COLORS = {
-  hickey:      '#ff6400',
-  spot:        '#00c8ff',
-  streak:      '#ff3366',
-  scratch:     '#cc44ff',
-  missing_ink: '#00ff96',
-  mat_net:     '#00e5b3',
-  extra_ink:   '#ff4444',
-  blur:        '#ffd000',
-  anomaly:     '#aaaaaa',
-};
+        # Classify defect type by shape
+        defect_type = classify_defect(cnt, area, bw, bh, total_area, aw_img, aligned_print)
+        if defect_type is None:
+            continue
 
-const DEFECT_LABELS = {
-  hickey:      'Hickey',
-  spot:        'Spot / đốm mực',
-  streak:      'Vệt / sọc',
-  scratch:     'Xước / trầy',
-  missing_ink: 'Thiếu nét / mất mực',
-  mat_net:     'Mất nét chữ',
-  extra_ink:   'Thừa mực / lem',
-  blur:        'Nhòe / mờ',
-  anomaly:     'Bất thường',
-};
+        # Compute mean diff intensity in region
+        mask_roi = np.zeros(thresh.shape, np.uint8)
+        cv2.drawContours(mask_roi, [cnt], -1, 255, -1)
+        mean_diff = float(cv2.mean(diff, mask=mask_roi)[0])
 
-function triggerFile(id) {
-  document.getElementById('file-'+id).click();
+        # Severity
+        if mean_diff > 80 or area > total_area * 0.005:
+            severity = 'high'
+        elif mean_diff > 50 or area > total_area * 0.001:
+            severity = 'medium'
+        else:
+            severity = 'low'
+
+        defects.append({
+            'type': defect_type['type'],
+            'label': defect_type['label'],
+            'x': int(x),
+            'y': int(y),
+            'w': int(bw),
+            'h': int(bh),
+            'area': int(area),
+            'severity': severity,
+            'mean_diff': round(mean_diff, 1),
+            'contour': cnt
+        })
+
+    return defects, thresh
+
+def classify_defect(cnt, area, bw, bh, total_area, aw_img, pr_img):
+    """Classify defect type based on shape, size and context."""
+    # Aspect ratio
+    aspect = bw / bh if bh > 0 else 1.0
+    # Circularity
+    perimeter = cv2.arcLength(cnt, True)
+    circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+
+    # Relative size
+    rel_size = area / total_area
+
+    # Hickey: small circular ring-like defect
+    if circularity > 0.6 and area < total_area * 0.002 and bw < 60 and bh < 60:
+        return {'type': 'hickey', 'label': 'Hickey'}
+
+    # Spot / ink spot: small roughly circular blob
+    if circularity > 0.5 and area < total_area * 0.005 and max(bw, bh) < 80:
+        return {'type': 'spot', 'label': 'Spot / đốm mực'}
+
+    # Streak / vệt: very elongated
+    if aspect > 5 or aspect < 0.2:
+        return {'type': 'streak', 'label': 'Vệt / sọc'}
+
+    # Scratch / xước: thin elongated
+    if (aspect > 3 or aspect < 0.33) and area < total_area * 0.01:
+        return {'type': 'scratch', 'label': 'Xước / trầy'}
+
+    # Missing ink / thiếu nét: large area lighter than AW
+    x, y, w2, h2 = cv2.boundingRect(cnt)
+    aw_roi  = aw_img[y:y+h2, x:x+w2]
+    pr_roi  = pr_img[y:y+h2, x:x+w2]
+    aw_mean = float(np.mean(cv2.cvtColor(aw_roi, cv2.COLOR_BGR2GRAY))) if aw_roi.size > 0 else 128
+    pr_mean = float(np.mean(cv2.cvtColor(pr_roi, cv2.COLOR_BGR2GRAY))) if pr_roi.size > 0 else 128
+
+    if pr_mean > aw_mean + 20:
+        if rel_size > 0.002:
+            return {'type': 'missing_ink', 'label': 'Thiếu nét / mất mực'}
+        else:
+            return {'type': 'mat_net', 'label': 'Mất nét chữ'}
+
+    # Extra ink / thừa mực
+    if pr_mean < aw_mean - 20:
+        return {'type': 'extra_ink', 'label': 'Thừa mực / lem mực'}
+
+    # Blur / nhòe
+    aw_lap  = cv2.Laplacian(cv2.cvtColor(aw_roi,  cv2.COLOR_BGR2GRAY), cv2.CV_64F).var() if aw_roi.size > 0 else 100
+    pr_lap  = cv2.Laplacian(cv2.cvtColor(pr_roi,  cv2.COLOR_BGR2GRAY), cv2.CV_64F).var() if pr_roi.size > 0 else 100
+    if pr_lap < aw_lap * 0.5:
+        return {'type': 'blur', 'label': 'Nhòe / mờ chữ'}
+
+    # General anomaly
+    if rel_size < 0.0001:
+        return None  # too small, skip
+    return {'type': 'anomaly', 'label': 'Bất thường'}
+
+# ─── Step 3: Draw results on image ──────────────────────────────────────────
+
+DEFECT_COLORS = {
+    'hickey':       (0,   100, 255),
+    'spot':         (0,   200, 255),
+    'streak':       (255, 100,   0),
+    'scratch':      (180,   0, 255),
+    'missing_ink':  (0,   255, 150),
+    'mat_net':      (0,   255,  80),
+    'extra_ink':    (255,  50,  50),
+    'blur':         (255, 200,   0),
+    'anomaly':      (200, 200, 200),
 }
 
-function loadFile(event, id) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => setImage(id, e.target.result, file.name);
-  reader.readAsDataURL(file);
-}
+def draw_defects(img, defects):
+    out = img.copy()
+    for i, d in enumerate(defects):
+        color = DEFECT_COLORS.get(d['type'], (200, 200, 200))
+        x, y, w, h = d['x'], d['y'], d['w'], d['h']
 
-function setImage(id, dataUrl, name) {
-  imgs[id] = dataUrl;
-  const zone = document.getElementById('drop-'+id);
-  zone.classList.add('has-image');
-  zone.innerHTML = `
-    <img src="${dataUrl}" alt="${name}">
-    <div class="img-overlay">
-      <span class="img-name">${name}</span>
-      <button class="change-btn" onclick="event.stopPropagation();triggerFile('${id}')">Đổi ảnh</button>
-    </div>`;
-  zone.onclick = null;
-  document.getElementById(id+'-name').textContent = name;
-  updateStatus();
-}
+        # Filled semi-transparent overlay
+        overlay = out.copy()
+        cv2.rectangle(overlay, (x, y), (x+w, y+h), color, -1)
+        cv2.addWeighted(overlay, 0.25, out, 0.75, 0, out)
 
-function onDragOver(e, id) { e.preventDefault(); document.getElementById('drop-'+id).classList.add('dragover'); }
-function onDragLeave(id) { document.getElementById('drop-'+id).classList.remove('dragover'); }
-function onDrop(e, id) {
-  e.preventDefault(); onDragLeave(id);
-  const file = e.dataTransfer.files[0];
-  if (!file || !file.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.onload = ev => setImage(id, ev.target.result, file.name);
-  reader.readAsDataURL(file);
-}
+        # Border
+        thick = 3 if d['severity'] == 'high' else 2
+        cv2.rectangle(out, (x, y), (x+w, y+h), color, thick)
 
-function updateSens() {
-  const v = parseInt(document.getElementById('sensitivity').value);
-  document.getElementById('sens-val').textContent = v;
-  const hints = {10:'Cực nhạy (nhiều false positive)',20:'Rất nhạy',35:'Cân bằng',50:'Ít nhạy',65:'Chỉ lỗi rõ',80:'Chỉ lỗi nghiêm trọng'};
-  const keys = [10,20,35,50,65,80];
-  const nearest = keys.reduce((a,b) => Math.abs(b-v) < Math.abs(a-v) ? b : a);
-  document.getElementById('sens-hint').textContent = hints[nearest] || '';
-  updateStatus();
-}
+        # Label badge
+        label = f"#{i+1} {d['label']}"
+        font_scale = 0.45
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, 1)
+        by = max(y - 4, th + 4)
+        cv2.rectangle(out, (x, by - th - 4), (x + tw + 6, by + 2), color, -1)
+        cv2.putText(out, label, (x + 3, by - 2), font, font_scale, (0, 0, 0), 1, cv2.LINE_AA)
 
-function updateStatus() {
-  const hasAw = !!imgs.aw, hasPrint = !!imgs.print;
-  const btn = document.getElementById('run-btn');
-  const dot = document.getElementById('status-dot');
-  const txt = document.getElementById('status-text');
-  if (!hasAw) { txt.textContent='Tải ảnh Artwork gốc'; dot.className='status-dot'; btn.disabled=true; return; }
-  if (!hasPrint) { txt.textContent='Tải ảnh tờ in thực tế'; dot.className='status-dot'; btn.disabled=true; return; }
-  txt.textContent='Sẵn sàng phân tích — Computer Vision + AI';
-  dot.className='status-dot ready'; btn.disabled=false;
-}
+    return out
 
-function b64fromDataUrl(dataUrl) {
-  return dataUrl.split(',')[1];
-}
+# ─── Step 4: Gemini description ─────────────────────────────────────────────
 
-const LOADING_STEPS = [
-  'Đang giải mã ảnh...',
-  'Căn chỉnh tờ in với AW (feature matching)...',
-  'So sánh pixel — tìm vùng bất thường...',
-  'Phân loại lỗi: hickey, spot, vệt, xước...',
-  'Vẽ kết quả lên ảnh...',
-  'AI đang viết báo cáo...',
-];
-let stepIdx = 0;
-let stepTimer = null;
+def describe_defects_with_gemini(defects, aw_b64, result_b64):
+    if not GEMINI_API_KEY or not defects:
+        return None
 
-function startLoadingSteps() {
-  stepIdx = 0;
-  document.getElementById('loading-step').textContent = LOADING_STEPS[0];
-  stepTimer = setInterval(() => {
-    stepIdx = Math.min(stepIdx + 1, LOADING_STEPS.length - 1);
-    document.getElementById('loading-step').textContent = LOADING_STEPS[stepIdx];
-  }, 2200);
-}
+    summary_list = "\n".join([
+        f"- Lỗi #{i+1}: {d['label']} (mức độ: {d['severity']}, diện tích: {d['area']}px²)"
+        for i, d in enumerate(defects)
+    ])
 
-function stopLoadingSteps() {
-  clearInterval(stepTimer);
-}
+    prompt = f"""Bạn là chuyên gia QC ngành in ấn bao bì.
+Tôi đã dùng Computer Vision phát hiện được {len(defects)} bất thường khi so sánh Artwork gốc với tờ in thực tế.
 
-async function runAnalysis() {
-  document.getElementById('loading').classList.add('show');
-  document.getElementById('loading-title').textContent = 'Đang phân tích tờ in...';
-  startLoadingSteps();
+Danh sách lỗi phát hiện:
+{summary_list}
 
-  try {
-    const sensitivity = parseInt(document.getElementById('sensitivity').value);
-    const res = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        awImage:    b64fromDataUrl(imgs.aw),
-        printImage: b64fromDataUrl(imgs.print),
-        sensitivity
-      })
-    });
+Hãy viết báo cáo QC ngắn gọn bằng tiếng Việt:
+1. Đánh giá tổng thể tờ in
+2. Lỗi nghiêm trọng nhất cần xử lý ngay
+3. Khuyến nghị hành động (in lại / có thể chấp nhận / cần kiểm tra thêm)
 
-    const data = await res.json();
-    stopLoadingSteps();
-    document.getElementById('loading').classList.remove('show');
+Trả lời ngắn gọn, không quá 150 từ."""
 
-    if (data.error) {
-      alert('Lỗi: ' + data.error);
-      return;
-    }
+    try:
+        body = {
+            "contents": [{"parts": [
+                {"inline_data": {"mime_type": "image/jpeg", "data": aw_b64}},
+                {"inline_data": {"mime_type": "image/png",  "data": result_b64}},
+                {"text": prompt}
+            ]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 400}
+        }
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json=body, timeout=30
+        )
+        data = r.json()
+        return data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+    except Exception as e:
+        return f"(Không lấy được nhận xét AI: {e})"
 
-    renderResults(data);
+# ─── Main API endpoint ───────────────────────────────────────────────────────
 
-  } catch(err) {
-    stopLoadingSteps();
-    document.getElementById('loading').classList.remove('show');
-    alert('Lỗi kết nối server: ' + err.message);
-  }
-}
+@app.route('/api/analyze', methods=['POST', 'OPTIONS'])
+def analyze():
+    if request.method == 'OPTIONS':
+        return '', 204
 
-function renderResults(data) {
-  const { verdict, defect_count, defects, result_image, diff_image, ai_summary } = data;
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data'}), 400
 
-  // Show results panel
-  const panel = document.getElementById('results');
-  panel.classList.add('show');
-  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    aw_b64    = data.get('awImage')
+    print_b64 = data.get('printImage')
+    sensitivity = int(data.get('sensitivity', 35))
 
-  // Verdict badge
-  const vb = document.getElementById('verdict-badge');
-  const vMap = { PASS: ['v-pass','ĐẠT CHUẨN'], FAIL: ['v-fail','PHÁT HIỆN LỖI'], REVIEW: ['v-review','CẦN KIỂM TRA'] };
-  const [vcls, vtxt] = vMap[verdict] || ['v-review', verdict];
-  vb.className = 'verdict-badge ' + vcls;
-  vb.textContent = vtxt;
+    if not aw_b64 or not print_b64:
+        return jsonify({'error': 'Thiếu ảnh'}), 400
 
-  // Stats
-  const highCount = defects.filter(d => d.severity === 'high').length;
-  const medCount  = defects.filter(d => d.severity === 'medium').length;
-  document.getElementById('result-stats').innerHTML = `
-    <div class="stat"><div class="stat-num" style="color:var(--danger)">${defect_count}</div><div class="stat-lbl">Tổng lỗi</div></div>
-    <div class="stat"><div class="stat-num" style="color:var(--danger)">${highCount}</div><div class="stat-lbl">Nghiêm trọng</div></div>
-    <div class="stat"><div class="stat-num" style="color:var(--warn)">${medCount}</div><div class="stat-lbl">Trung bình</div></div>
-  `;
+    try:
+        # Decode images
+        aw_img    = b64_to_cv2(aw_b64)
+        print_img = b64_to_cv2(print_b64)
 
-  // Images
-  document.getElementById('result-img').src = 'data:image/png;base64,' + result_image;
-  document.getElementById('diff-img').src   = 'data:image/png;base64,' + diff_image;
+        if aw_img is None or print_img is None:
+            return jsonify({'error': 'Không đọc được ảnh'}), 400
 
-  // Legend
-  const types = [...new Set(defects.map(d => d.type))];
-  document.getElementById('legend').innerHTML = types.map(t => `
-    <div class="legend-item">
-      <div class="legend-color" style="background:${DEFECT_COLORS[t]||'#aaa'}"></div>
-      ${DEFECT_LABELS[t] || t}
-    </div>`).join('');
+        # Resize to max 2000px
+        aw_img    = resize_keep_aspect(aw_img,    2000)
+        print_img = resize_keep_aspect(print_img, 2000)
 
-  // Defect cards
-  if (defects.length > 0) {
-    document.getElementById('defect-section').style.display = '';
-    document.getElementById('defect-grid').innerHTML = defects.map((d, i) => {
-      const color = DEFECT_COLORS[d.type] || '#aaa';
-      const sevCls = { high: 'sev-high', medium: 'sev-medium', low: 'sev-low' }[d.severity] || 'sev-low';
-      return `
-        <div class="defect-card">
-          <div class="defect-num" style="background:${color}">${i+1}</div>
-          <div>
-            <div class="defect-type" style="color:${color}">${d.label}</div>
-            <div class="defect-meta">
-              <span class="${sevCls}">${d.severity === 'high' ? '● Nghiêm trọng' : d.severity === 'medium' ? '◐ Trung bình' : '○ Nhẹ'}</span>
-              &nbsp;·&nbsp; ${d.area}px² &nbsp;·&nbsp; diff: ${d.mean_diff}
-            </div>
-          </div>
-        </div>`;
-    }).join('');
-  }
+        # Step 1: Align
+        aligned = align_images(aw_img, print_img)
 
-  // AI summary
-  if (ai_summary) {
-    document.getElementById('ai-section').style.display = '';
-    document.getElementById('ai-text').textContent = ai_summary;
-  }
-}
+        # Step 2: Detect defects
+        defects, diff_map = detect_defects(aw_img, aligned, sensitivity)
 
-function zoomImg(src) {
-  document.getElementById('zoom-img').src = src;
-  document.getElementById('zoom-modal').classList.add('show');
-}
-function closeZoom() {
-  document.getElementById('zoom-modal').classList.remove('show');
-}
+        # Step 3: Draw results
+        result_img = draw_defects(aligned, defects)
 
-updateStatus();
-updateSens();
-</script>
-</body>
-</html>
+        # Step 4: Encode outputs
+        result_b64  = cv2_to_b64(result_img)
+        diff_b64    = cv2_to_b64(diff_map)
+        aligned_b64 = cv2_to_b64(aligned)
+
+        # Step 5: Gemini summary
+        ai_summary = describe_defects_with_gemini(
+            defects,
+            pil_to_b64(Image.fromarray(cv2.cvtColor(aw_img, cv2.COLOR_BGR2RGB))),
+            result_b64
+        )
+
+        # Format response (remove contour - not JSON serializable)
+        defects_out = [{k: v for k, v in d.items() if k != 'contour'} for d in defects]
+
+        verdict = 'PASS' if len(defects) == 0 else (
+            'FAIL' if any(d['severity'] == 'high' for d in defects) else 'REVIEW'
+        )
+
+        return jsonify({
+            'verdict': verdict,
+            'defect_count': len(defects),
+            'defects': defects_out,
+            'result_image': result_b64,
+            'diff_image': diff_b64,
+            'aligned_image': aligned_b64,
+            'ai_summary': ai_summary,
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve(path):
+    if path and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, 'index.html')
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    print(f'QC Inspector running at http://localhost:{port}')
+    app.run(host='0.0.0.0', port=port, debug=False)
