@@ -304,18 +304,59 @@ const CAL = {active:false, pts:[], dpi:null};
 // ── File loading ───────────────────────────────────────────────────────────────
 function trigFile(id){
   const inp = document.getElementById('file-'+id);
-  if(inp){ inp.value=''; inp.click(); }
+  if(!inp) return;
+  inp.value = '';
+  inp.click();
 }
 
 function loadF(e, id){
   const file = e.target.files[0];
-  if(!file) return;
+  if(!file){ console.log('No file selected'); return; }
+  console.log('loadF:', id, file.name, file.type, file.size);
+
+  if(id === 'print'){
+    // Simple direct approach for print image
+    loadPrintImage(file);
+    return;
+  }
+
+  // AW file - use FileReader for base64 (needed for API)
   const reader = new FileReader();
   reader.onload = ev => processFile(id, ev.target.result, file.name, file.type);
-  reader.onerror = () => alert('Không đọc được file. Thử lại!');
+  reader.onerror = () => alert('Lỗi đọc file AW!');
   reader.readAsDataURL(file);
-  // Reset input so same file can be reloaded
   e.target.value = '';
+}
+
+function loadPrintImage(file){
+  console.log('loadPrintImage:', file.name);
+  const objectUrl = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = function(){
+    console.log('Print loaded:', img.naturalWidth, 'x', img.naturalHeight);
+    S.print.img = img;
+    S.print.imgW = img.naturalWidth;
+    S.print.imgH = img.naturalHeight;
+    // Also store as dataURL for API
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    S.print.dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    document.getElementById('pr-nm').textContent = file.name;
+    document.getElementById('chg-pr').style.display = '';
+    const uov = document.getElementById('uov-pr');
+    if(uov) uov.style.display = 'none';
+    renderCanvas('print');
+    updateStatus();
+    URL.revokeObjectURL(objectUrl);
+  };
+  img.onerror = function(){
+    console.error('Print image failed to load');
+    alert('Không load được ảnh! Thử ảnh JPG/PNG khác.');
+    URL.revokeObjectURL(objectUrl);
+  };
+  img.src = objectUrl;
 }
 
 // Drag & drop on upload overlays - bound after DOM ready
@@ -606,11 +647,16 @@ function cropB64(id){
   const s = S[id];
   if(!s.canvas || !s.rect) return null;
   const {x,y,w,h} = s.rect;
+  const cw = Math.max(1, Math.round(w));
+  const ch = Math.max(1, Math.round(h));
   const tmp = document.createElement('canvas');
-  tmp.width = Math.max(1,Math.round(w));
-  tmp.height = Math.max(1,Math.round(h));
-  tmp.getContext('2d').drawImage(s.canvas, x, y, w, h, 0, 0, tmp.width, tmp.height);
-  return tmp.toDataURL('image/jpeg', 0.95).split(',')[1];
+  tmp.width = cw; tmp.height = ch;
+  const ctx = tmp.getContext('2d');
+  // Draw from canvas (scaled) - works for both aw and print
+  ctx.drawImage(s.canvas, x, y, w, h, 0, 0, cw, ch);
+  const b64 = tmp.toDataURL('image/jpeg', 0.95).split(',')[1];
+  console.log('cropB64', id, cw+'x'+ch, b64.length, 'chars');
+  return b64;
 }
 
 // ── Progress ──────────────────────────────────────────────────────────────────
