@@ -352,29 +352,36 @@ def make_color_overlay(print_img, all_regions_defects):
 
 def make_black_dot_map(print_img, all_regions_defects, heat_maps):
     """
-    Ảnh nền đen, chỉ hiện điểm trắng tại vị trí lỗi.
-    Độ sáng ~ mức độ nghiêm trọng.
+    Nền đen tuyền. Vị trí lỗi = copy pixel thật từ ảnh chụp (màu gốc).
+    QC nhìn ảnh nền đen, thấy màu = có lỗi ở đó.
     """
-    out = np.zeros(print_img.shape[:2], np.uint8)
-    for region_heat, rx, ry, rw, rh in heat_maps:
-        # Paste heat vào đúng vị trí
-        rh2 = min(rh, out.shape[0]-ry)
-        rw2 = min(rw, out.shape[1]-rx)
-        if rh2<=0 or rw2<=0: continue
-        heat_resized = cv2.resize((region_heat*255).astype(np.uint8),(rw2,rh2))
-        out[ry:ry+rh2, rx:rx+rw2] = np.maximum(out[ry:ry+rh2,rx:rx+rw2], heat_resized)
+    # Nền đen hoàn toàn
+    out = np.zeros_like(print_img)
 
-    # Tăng contrast
-    out = cv2.normalize(out, None, 0, 255, cv2.NORM_MINMAX)
-    # Threshold thấp để chỉ hiện vùng có lỗi
-    _, out_thresh = cv2.threshold(out, 40, 255, cv2.THRESH_BINARY)
-    # Tô vòng tròn nhỏ tại tâm mỗi lỗi để dễ thấy
-    out_bgr = cv2.cvtColor(out_thresh, cv2.COLOR_GRAY2BGR)
+    for region_heat, rx, ry, rw, rh in heat_maps:
+        rh2 = min(rh, print_img.shape[0]-ry)
+        rw2 = min(rw, print_img.shape[1]-rx)
+        if rh2<=0 or rw2<=0: continue
+        heat_r = cv2.resize(region_heat.astype(np.float32),(rw2,rh2))
+        # Lấy binary mask từ heat
+        _, mask = cv2.threshold((heat_r*255).astype(np.uint8), 30, 255, cv2.THRESH_BINARY)
+        # Dilate nhẹ để dễ thấy
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
+        mask = cv2.dilate(mask, k)
+        # Copy pixel gốc từ print_img vào vùng mask
+        roi_print = print_img[ry:ry+rh2, rx:rx+rw2]
+        roi_out   = out[ry:ry+rh2, rx:rx+rw2]
+        roi_out[mask>0] = roi_print[mask>0]
+
+    # Thêm viền trắng mỏng quanh mỗi defect bbox để QC dễ định vị
     for d in all_regions_defects:
-        cx = d['x'] + d['w']//2; cy = d['y'] + d['h']//2
-        r = max(d['w'],d['h'])//2 + 3
-        cv2.circle(out_bgr,(cx,cy),r,(255,255,255),1)
-    return out_bgr
+        x,y,w,h = d['x'],d['y'],d['w'],d['h']
+        ih,iw = out.shape[:2]
+        x=max(0,x);y=max(0,y);w=min(w,iw-x);h=min(h,ih-y)
+        if w>0 and h>0:
+            cv2.rectangle(out,(x,y),(x+w,y+h),(255,255,255),1)
+
+    return out
 
 # ── Gemini text check ─────────────────────────────────────────────────────────
 
@@ -452,50 +459,67 @@ def analyze():
         if aw_region is None or print_full is None:
             return jsonify({'error':'Không đọc được ảnh'}),400
 
-        # ── Tìm tất cả vùng giống AW trên tờ in ──
-        regions = find_layout_regions(aw_region, print_full, threshold=0.50)
-        if not regions:
-            # Fallback: dùng toàn bộ ảnh in
-            h,w = print_full.shape[:2]
-            regions = [(0, 0, w, h, 1.0)]
+        mode = data.get('mode', 'template')  # 'direct' hoặc 'template'
+        all_defects = []
+        heat_maps   = []
+        layout_count = 1
 
-        # ── So sánh từng vùng ──
-        all_defects   = []
-        heat_maps     = []
+        if mode == 'direct':
+            # ── Mode trực tiếp: so sánh đúng 2 vùng đã crop ──
+            # print_b64 đã là vùng crop từ frontend
+            print_crop = b64_to_cv2(print_b64)
+            if print_crop is None:
+                return jsonify({'error':'Không đọc được vùng tờ in'}),400
 
-        for (rx, ry, rw, rh, score) in regions:
-            # Crop vùng tương ứng trên tờ in
-            rh2 = min(rh, print_full.shape[0]-ry)
-            rw2 = min(rw, print_full.shape[1]-rx)
-            if rh2<10 or rw2<10: continue
-            print_crop = print_full[ry:ry+rh2, rx:rx+rw2]
-            aw_resized = cv2.resize(aw_region, (rw2, rh2))
+            # Resize về cùng kích thước
+            h_aw,w_aw = aw_region.shape[:2]
+            print_resized = cv2.resize(print_crop,(w_aw,h_aw))
 
-            # 5-method comparison
-            heat, binary, print_aligned = compare_region(
-                aw_resized, print_crop, dpi, sensitivity
-            )
-            heat_maps.append((heat, rx, ry, rw2, rh2))
-
-            # Extract defects
-            region_defects = extract_defects(
-                binary, heat, aw_resized, print_aligned, dpi, rx, ry
-            )
+            heat, binary, print_aligned = compare_region(aw_region, print_resized, dpi, sensitivity)
+            heat_maps.append((heat, 0, 0, w_aw, h_aw))
+            region_defects = extract_defects(binary, heat, aw_region, print_aligned, dpi, 0, 0)
             all_defects.extend(region_defects)
 
-        # ── Text check (Gemini) ──
-        text_defects = []
-        if check_text and GEMINI_API_KEY and regions:
-            # Dùng vùng đầu tiên để check text
-            rx,ry,rw,rh,_ = regions[0]
-            rh2=min(rh,print_full.shape[0]-ry); rw2=min(rw,print_full.shape[1]-rx)
-            pc = print_full[ry:ry+rh2, rx:rx+rw2]
-            ar = cv2.resize(aw_region,(rw2,rh2))
-            text_defects = check_text_gemini(ar, pc)
-            # Offset tọa độ
-            for td in text_defects:
-                td['x'] = td.get('x',0)+rx; td['y'] = td.get('y',0)+ry
-                td['verdict'] = 'FAIL'; td['size_str'] = td.get('detail','')
+            # Text check trên 2 vùng
+            text_defects = []
+            if check_text and GEMINI_API_KEY:
+                text_defects = check_text_gemini(aw_region, print_aligned)
+                for td in text_defects:
+                    td['verdict']='FAIL'; td['size_str']=td.get('detail','')
+
+            # Dùng print_aligned làm ảnh base cho output
+            print_full = print_aligned
+
+        else:
+            # ── Mode template: tìm tất cả vùng giống AW ──
+            print_full = b64_to_cv2(print_b64)
+            if print_full is None:
+                return jsonify({'error':'Không đọc được ảnh tờ in'}),400
+
+            regions = find_layout_regions(aw_region, print_full, threshold=0.50)
+            if not regions:
+                h,w = print_full.shape[:2]
+                regions = [(0,0,w,h,1.0)]
+            layout_count = len(regions)
+
+            for (rx,ry,rw,rh,score) in regions:
+                rh2=min(rh,print_full.shape[0]-ry); rw2=min(rw,print_full.shape[1]-rx)
+                if rh2<10 or rw2<10: continue
+                print_crop = print_full[ry:ry+rh2, rx:rx+rw2]
+                aw_resized = cv2.resize(aw_region,(rw2,rh2))
+                heat,binary,paligned = compare_region(aw_resized,print_crop,dpi,sensitivity)
+                heat_maps.append((heat,rx,ry,rw2,rh2))
+                all_defects.extend(extract_defects(binary,heat,aw_resized,paligned,dpi,rx,ry))
+
+            text_defects = []
+            if check_text and GEMINI_API_KEY and regions:
+                rx,ry,rw,rh,_=regions[0]
+                rh2=min(rh,print_full.shape[0]-ry); rw2=min(rw,print_full.shape[1]-rx)
+                pc=print_full[ry:ry+rh2,rx:rx+rw2]; ar=cv2.resize(aw_region,(rw2,rh2))
+                text_defects=check_text_gemini(ar,pc)
+                for td in text_defects:
+                    td['x']=td.get('x',0)+rx; td['y']=td.get('y',0)+ry
+                    td['verdict']='FAIL'; td['size_str']=td.get('detail','')
 
         # ── Tạo 2 loại ảnh output ──
         combined = all_defects + text_defects
@@ -520,7 +544,7 @@ def analyze():
             'warn_count':     warn_c,
             'physical_count': len(all_defects),
             'text_count':     len(text_defects),
-            'layout_count':   len(regions),
+            'layout_count':   layout_count,
             'defects':        phys_out + text_out,
             'result_color':   cv2_to_b64(result_color),
             'result_dotmap':  cv2_to_b64(result_dotmap),
