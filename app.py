@@ -2,603 +2,532 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import cv2
 import numpy as np
-import base64
-import os
-import requests
-import json
-import math
+import base64, os, math, json, requests
 from io import BytesIO
 from PIL import Image, ExifTags
+from skimage.metrics import structural_similarity as ssim
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
-
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
-# ── Tiêu chuẩn chất lượng in (mm) ────────────────────────────────────────────
+# ── QC Standards (mm) ────────────────────────────────────────────────────────
 QC_STANDARDS = {
-    'dot':          {'warn': 0.3,  'fail': 0.5,  'unit': 'diameter_mm'},
-    'spot':         {'warn': 0.3,  'fail': 0.5,  'unit': 'diameter_mm'},
-    'hickey':       {'warn': 0.3,  'fail': 0.5,  'unit': 'diameter_mm'},
-    'scratch':      {'warn': 3.0,  'fail': 5.0,  'unit': 'length_mm'},
-    'streak':       {'warn': 3.0,  'fail': 5.0,  'unit': 'length_mm'},
-    'missing_ink':  {'warn': 0.5,  'fail': 1.0,  'unit': 'area_mm2'},
-    'extra_ink':    {'warn': 0.5,  'fail': 1.0,  'unit': 'area_mm2'},
-    'blur':         {'warn': 1.0,  'fail': 2.0,  'unit': 'area_mm2'},
-    'anomaly':      {'warn': 0.5,  'fail': 1.0,  'unit': 'area_mm2'},
+    'dot':         {'warn':0.3,  'fail':0.5,  'measure':'diameter_mm'},
+    'spot':        {'warn':0.3,  'fail':0.5,  'measure':'diameter_mm'},
+    'hickey':      {'warn':0.3,  'fail':0.5,  'measure':'diameter_mm'},
+    'scratch':     {'warn':3.0,  'fail':5.0,  'measure':'length_mm'},
+    'streak':      {'warn':3.0,  'fail':5.0,  'measure':'length_mm'},
+    'missing_ink': {'warn':0.5,  'fail':1.0,  'measure':'area_mm2'},
+    'extra_ink':   {'warn':0.5,  'fail':1.0,  'measure':'area_mm2'},
+    'blur':        {'warn':0.5,  'fail':1.0,  'measure':'area_mm2'},
+    'anomaly':     {'warn':0.3,  'fail':0.5,  'measure':'area_mm2'},
+}
+
+DEFECT_LABELS = {
+    'dot':'Dot/chấm','spot':'Spot/đốm','hickey':'Hickey',
+    'scratch':'Xước/vệt dài','streak':'Vệt/sọc',
+    'missing_ink':'Thiếu mực','extra_ink':'Thừa mực',
+    'blur':'Nhòe/mờ','anomaly':'Bất thường',
+}
+
+DEFECT_COLORS_CV = {
+    'dot':(0,220,255),'spot':(0,200,255),'hickey':(0,100,255),
+    'scratch':(255,50,200),'streak':(255,140,0),
+    'missing_ink':(50,255,50),'extra_ink':(255,50,50),
+    'blur':(255,220,0),'anomaly':(180,180,180),
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def b64_to_cv2(b64_str):
-    data = base64.b64decode(b64_str)
-    arr  = np.frombuffer(data, np.uint8)
+def b64_to_cv2(b64):
+    arr = np.frombuffer(base64.b64decode(b64), np.uint8)
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-
-def b64_to_pil(b64_str):
-    return Image.open(BytesIO(base64.b64decode(b64_str)))
 
 def cv2_to_b64(img):
     _, buf = cv2.imencode('.png', img)
-    return base64.b64encode(buf).decode('utf-8')
+    return base64.b64encode(buf).decode()
 
-def img_to_b64_jpeg(img, quality=92):
-    _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    return base64.b64encode(buf).decode('utf-8')
+def img_to_b64_jpeg(img, q=90):
+    _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, q])
+    return base64.b64encode(buf).decode()
 
-def px_to_mm(px, dpi):
-    return px / dpi * 25.4
+def px_to_mm(px, dpi): return px / dpi * 25.4
+def mm_to_px(mm, dpi): return mm / 25.4 * dpi
+def area_to_mm2(area_px, dpi): return area_px / (dpi/25.4)**2
+def diameter_from_area_mm(a): return 2*math.sqrt(a/math.pi)
 
-def mm_to_px(mm, dpi):
-    return mm / 25.4 * dpi
+def judge(dtype, val_mm):
+    s = QC_STANDARDS.get(dtype, QC_STANDARDS['anomaly'])
+    if val_mm >= s['fail']:   return 'FAIL'
+    elif val_mm >= s['warn']: return 'WARN'
+    return 'PASS'
 
-def area_px_to_mm2(area_px, dpi):
-    px_per_mm = dpi / 25.4
-    return area_px / (px_per_mm ** 2)
+# ── DPI extraction ────────────────────────────────────────────────────────────
 
-def diameter_from_area_mm(area_mm2):
-    return 2 * math.sqrt(area_mm2 / math.pi)
+def get_aw_dpi(b64_str, ftype='image'):
+    if ftype == 'pdf':
+        return _pdf_info(b64_str)
+    return _img_info(b64_str)
 
-def judge_defect(defect_type, measurement_mm):
-    """
-    Phán định PASS/WARN/FAIL theo tiêu chuẩn QC in ấn.
-    measurement_mm là đường kính (mm) cho dot/spot/hickey,
-    hoặc chiều dài (mm) cho scratch/streak,
-    hoặc diện tích (mm²) cho các loại khác.
-    """
-    std = QC_STANDARDS.get(defect_type, QC_STANDARDS['anomaly'])
-    if measurement_mm >= std['fail']:
-        return 'FAIL', std['fail'], std['unit']
-    elif measurement_mm >= std['warn']:
-        return 'WARN', std['warn'], std['unit']
-    else:
-        return 'PASS', std['warn'], std['unit']
-
-# ── Đọc DPI/kích thước từ AW ─────────────────────────────────────────────────
-
-def extract_aw_info(b64_str, file_type='image'):
-    """
-    Trả về dict: { dpi, width_mm, height_mm, source }
-    """
-    result = {'dpi': None, 'width_mm': None, 'height_mm': None, 'source': 'unknown'}
-
-    if file_type == 'pdf':
-        result = _extract_from_pdf(b64_str)
-    else:
-        result = _extract_from_image(b64_str)
-
-    # Fallback nếu không đọc được
-    if not result['dpi']:
-        result['dpi'] = 150.0
-        result['source'] = 'fallback_150dpi'
-
-    return result
-
-def _extract_from_pdf(b64_str):
-    """Đọc PDF, lấy kích thước trang thật và render thành ảnh."""
+def _pdf_info(b64_str):
     try:
-        import fitz  # PyMuPDF
-        pdf_bytes = base64.b64decode(b64_str)
-        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-        page = doc[0]
-
-        # Kích thước trang thật (points, 1 point = 1/72 inch)
-        rect = page.rect
-        width_pt  = rect.width
-        height_pt = rect.height
-        width_mm  = width_pt  / 72 * 25.4
-        height_mm = height_pt / 72 * 25.4
-
-        # Render ở DPI cao để phát hiện lỗi nhỏ
-        render_dpi = 300
-        mat = fitz.Matrix(render_dpi / 72, render_dpi / 72)
+        import fitz
+        doc = fitz.open(stream=base64.b64decode(b64_str), filetype='pdf')
+        page = doc[0]; rect = page.rect
+        w_mm = rect.width/72*25.4; h_mm = rect.height/72*25.4
+        dpi = 300
+        mat = fitz.Matrix(dpi/72, dpi/72)
         pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-        img_bytes = pix.tobytes('png')
-
-        # Convert to CV2
-        arr = np.frombuffer(img_bytes, np.uint8)
-        img_cv2 = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-
-        # Encode back to b64 for processing
-        _, buf = cv2.imencode('.png', img_cv2)
-        rendered_b64 = base64.b64encode(buf).decode('utf-8')
-
+        arr = np.frombuffer(pix.tobytes('png'), np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         doc.close()
-        return {
-            'dpi': float(render_dpi),
-            'width_mm': round(width_mm, 2),
-            'height_mm': round(height_mm, 2),
-            'source': f'pdf_metadata ({width_mm:.1f}×{height_mm:.1f}mm @ {render_dpi}dpi)',
-            'rendered_b64': rendered_b64,
-            'img_cv2': img_cv2,
-        }
+        return {'dpi':float(dpi),'width_mm':round(w_mm,2),'height_mm':round(h_mm,2),
+                'source':f'PDF {w_mm:.1f}×{h_mm:.1f}mm@{dpi}dpi','img_cv2':img}
     except Exception as e:
-        return {'dpi': None, 'width_mm': None, 'height_mm': None, 'source': f'pdf_error:{e}'}
+        return {'dpi':None,'source':f'pdf_err:{e}','img_cv2':None}
 
-def _extract_from_image(b64_str):
-    """Đọc PNG/JPG, lấy DPI từ EXIF/metadata."""
+def _img_info(b64_str):
     try:
-        pil_img = b64_to_pil(b64_str)
-        w_px, h_px = pil_img.size
-
-        dpi_x, dpi_y = None, None
-
-        # 1. Thử đọc DPI từ info (PNG dpi tag, JPEG JFIF)
-        if 'dpi' in pil_img.info:
-            dpi_x, dpi_y = pil_img.info['dpi']
-        elif 'jfif_density' in pil_img.info:
-            unit = pil_img.info.get('jfif_densityunit', 1)
-            dx, dy = pil_img.info['jfif_density']
-            if unit == 1:  # dots per inch
-                dpi_x, dpi_y = dx, dy
-            elif unit == 2:  # dots per cm
-                dpi_x, dpi_y = dx * 2.54, dy * 2.54
-
-        # 2. Thử EXIF
-        if not dpi_x:
+        pil = Image.open(BytesIO(base64.b64decode(b64_str)))
+        w,h = pil.size; dpi = None
+        if 'dpi' in pil.info:
+            dpi = float(pil.info['dpi'][0])
+        if not dpi:
             try:
-                exif = pil_img._getexif()
+                exif = pil._getexif()
                 if exif:
-                    for tag_id, val in exif.items():
-                        tag = ExifTags.TAGS.get(tag_id, '')
-                        if tag == 'XResolution':
-                            dpi_x = float(val[0]) / float(val[1]) if isinstance(val, tuple) else float(val)
-                        elif tag == 'YResolution':
-                            dpi_y = float(val[0]) / float(val[1]) if isinstance(val, tuple) else float(val)
-            except Exception:
-                pass
-
-        if dpi_x and dpi_x > 10:
-            dpi = float(dpi_x)
-            width_mm  = w_px / dpi * 25.4
-            height_mm = h_px / dpi * 25.4
-            source = f'image_metadata ({width_mm:.1f}×{height_mm:.1f}mm @ {dpi:.0f}dpi)'
-        else:
-            # Không có DPI — trả về None để frontend hỏi user
-            dpi, width_mm, height_mm = None, None, None
-            source = 'no_dpi_metadata'
-
-        # Convert to CV2
-        img_cv2 = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
-
-        return {
-            'dpi': dpi,
-            'width_mm': round(width_mm, 2) if width_mm else None,
-            'height_mm': round(height_mm, 2) if height_mm else None,
-            'source': source,
-            'img_cv2': img_cv2,
-        }
+                    for tid,val in exif.items():
+                        if ExifTags.TAGS.get(tid)=='XResolution':
+                            dpi = float(val[0]/val[1]) if isinstance(val,tuple) else float(val)
+            except: pass
+        img_cv2 = cv2.cvtColor(np.array(pil.convert('RGB')), cv2.COLOR_RGB2BGR)
+        if dpi and dpi > 10:
+            wm = w/dpi*25.4; hm = h/dpi*25.4
+            return {'dpi':dpi,'width_mm':round(wm,2),'height_mm':round(hm,2),
+                    'source':f'EXIF {wm:.1f}×{hm:.1f}mm@{dpi:.0f}dpi','img_cv2':img_cv2}
+        return {'dpi':None,'source':'no_dpi','img_cv2':img_cv2}
     except Exception as e:
-        return {'dpi': None, 'width_mm': None, 'height_mm': None, 'source': f'image_error:{e}'}
+        return {'dpi':None,'source':f'img_err:{e}','img_cv2':None}
 
-# ── Align ─────────────────────────────────────────────────────────────────────
+# ── Template matching: tìm tất cả vùng giống AW trên tờ in ──────────────────
 
-def align_images(aw_img, print_img):
-    aw_gray = cv2.cvtColor(aw_img, cv2.COLOR_BGR2GRAY)
-    pr_gray = cv2.cvtColor(print_img, cv2.COLOR_BGR2GRAY)
-
-    try:
-        detector = cv2.SIFT_create(nfeatures=4000)
-        norm = cv2.NORM_L2
-    except Exception:
-        detector = cv2.ORB_create(nfeatures=4000)
-        norm = cv2.NORM_HAMMING
-
-    kp1, des1 = detector.detectAndCompute(aw_gray, None)
-    kp2, des2 = detector.detectAndCompute(pr_gray, None)
-
-    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-        h, w = aw_img.shape[:2]
-        return cv2.resize(print_img, (w, h)), 1.0
-
-    bf = cv2.BFMatcher(norm, crossCheck=False)
-    try:
-        matches = bf.knnMatch(des1, des2, k=2)
-        good = [m for m, n in matches if m.distance < 0.75 * n.distance]
-    except Exception:
-        good = []
-
-    if len(good) < 8:
-        h, w = aw_img.shape[:2]
-        return cv2.resize(print_img, (w, h)), 1.0
-
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
-    H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-
-    if H is None:
-        h, w = aw_img.shape[:2]
-        return cv2.resize(print_img, (w, h)), 1.0
-
-    # Tính scale factor từ homography
-    scale_x = math.sqrt(H[0,0]**2 + H[1,0]**2)
-    scale_y = math.sqrt(H[0,1]**2 + H[1,1]**2)
-    scale_factor = (scale_x + scale_y) / 2.0
-
-    h, w = aw_img.shape[:2]
-    aligned = cv2.warpPerspective(print_img, H, (w, h),
-                                   flags=cv2.INTER_LINEAR,
-                                   borderMode=cv2.BORDER_REPLICATE)
-    return aligned, scale_factor
-
-# ── Detect defects ────────────────────────────────────────────────────────────
-
-def detect_defects(aw_img, aligned_print, sensitivity, dpi_aw, scale_factor):
+def find_layout_regions(aw_region, print_img, threshold=0.55):
     """
-    dpi_aw: DPI thật của AW gốc
-    scale_factor: tỉ lệ print/AW từ homography
-    → dpi_effective: DPI hiệu dụng để tính kích thước thật trên tờ in
+    Tìm tất cả vùng trên print_img giống aw_region.
+    Trả về list [(x,y,w,h,score), ...]
     """
-    dpi_effective = dpi_aw / scale_factor if scale_factor > 0 else dpi_aw
+    tpl_gray = cv2.cvtColor(aw_region, cv2.COLOR_BGR2GRAY)
+    src_gray = cv2.cvtColor(print_img, cv2.COLOR_BGR2GRAY)
+    th, tw = tpl_gray.shape[:2]
+    sh, sw = src_gray.shape[:2]
 
-    # LAB diff
-    aw_lab = cv2.cvtColor(aw_img,        cv2.COLOR_BGR2LAB).astype(np.float32)
-    pr_lab = cv2.cvtColor(aligned_print, cv2.COLOR_BGR2LAB).astype(np.float32)
-    diff   = (np.abs(aw_lab[:,:,0] - pr_lab[:,:,0]) * 1.5 +
-              np.abs(aw_lab[:,:,1] - pr_lab[:,:,1]) +
-              np.abs(aw_lab[:,:,2] - pr_lab[:,:,2])) / 3.0
+    if th > sh or tw > sw:
+        return []
 
-    thresh = (diff > sensitivity).astype(np.uint8) * 255
+    # Multi-scale template matching
+    best_scale = 1.0
+    best_val   = -1
+    for scale in np.linspace(0.7, 1.3, 25):
+        rw = int(tw * scale); rh = int(th * scale)
+        if rw < 10 or rh < 10 or rw > sw or rh > sh:
+            continue
+        resized = cv2.resize(tpl_gray, (rw, rh))
+        res = cv2.matchTemplate(src_gray, resized, cv2.TM_CCOEFF_NORMED)
+        _, mv, _, _ = cv2.minMaxLoc(res)
+        if mv > best_val:
+            best_val = mv; best_scale = scale
 
-    # Morphological ops — giữ vệt mảnh + lọc noise
-    k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2,2))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k2)
-    kh = cv2.getStructuringElement(cv2.MORPH_RECT, (7,2))
-    kv = cv2.getStructuringElement(cv2.MORPH_RECT, (2,7))
-    th = cv2.bitwise_or(
-        cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kh),
-        cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kv)
-    )
-    thresh_final = cv2.bitwise_or(thresh, th)
+    # Dùng scale tốt nhất để tìm tất cả vị trí
+    rw = int(tw * best_scale); rh = int(th * best_scale)
+    if rw < 10 or rh < 10 or rw > sw or rh > sh:
+        return []
+    resized_tpl = cv2.resize(tpl_gray, (rw, rh))
+    result = cv2.matchTemplate(src_gray, resized_tpl, cv2.TM_CCOEFF_NORMED)
 
-    contours, _ = cv2.findContours(thresh_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Non-max suppression để tìm nhiều vùng
+    regions = []
+    result_copy = result.copy()
+    while True:
+        _, max_val, _, max_loc = cv2.minMaxLoc(result_copy)
+        if max_val < threshold: break
+        x, y = max_loc
+        regions.append((x, y, rw, rh, float(max_val)))
+        # Suppress vùng lân cận
+        x1 = max(0, x - rw//2); y1 = max(0, y - rh//2)
+        x2 = min(result_copy.shape[1], x + rw//2 + rw)
+        y2 = min(result_copy.shape[0], y + rh//2 + rh)
+        result_copy[y1:y2, x1:x2] = -1
+        if len(regions) > 50: break
 
-    # Min detectable: dot đường kính 0.2mm
-    min_diameter_mm = 0.2
-    min_area_px = math.pi * (mm_to_px(min_diameter_mm/2, dpi_aw))**2
+    return regions
 
+# ── Multi-method comparison cho 1 vùng ──────────────────────────────────────
+
+def compare_region(aw_crop, print_crop, dpi, sensitivity):
+    """
+    So sánh 2 vùng bằng 5 phương pháp, trả về heat_map tổng hợp.
+    """
+    # Resize về cùng kích thước
+    h, w = aw_crop.shape[:2]
+    pc = cv2.resize(print_crop, (w, h))
+
+    # ── 1. Pixel diff (LAB) ──
+    aL = cv2.cvtColor(aw_crop, cv2.COLOR_BGR2LAB).astype(np.float32)
+    pL = cv2.cvtColor(pc,      cv2.COLOR_BGR2LAB).astype(np.float32)
+    diff_lab = (np.abs(aL[:,:,0]-pL[:,:,0])*1.5 +
+                np.abs(aL[:,:,1]-pL[:,:,1]) +
+                np.abs(aL[:,:,2]-pL[:,:,2])) / 3.0
+    map_pixel = np.clip(diff_lab / 100.0, 0, 1)
+
+    # ── 2. SSIM per-patch ──
+    ag = cv2.cvtColor(aw_crop, cv2.COLOR_BGR2GRAY)
+    pg = cv2.cvtColor(pc,      cv2.COLOR_BGR2GRAY)
+    win = max(3, min(7, min(h,w)//4 | 1))  # odd window
+    try:
+        score, ssim_map = ssim(ag, pg, win_size=win, full=True, data_range=255)
+        map_ssim = np.clip(1.0 - (ssim_map + 1) / 2.0, 0, 1)
+    except:
+        map_ssim = np.zeros((h,w), np.float32)
+
+    # ── 3. Edge compare (Canny) ──
+    ae = cv2.Canny(ag, 50, 150).astype(np.float32) / 255.0
+    pe = cv2.Canny(pg, 50, 150).astype(np.float32) / 255.0
+    # Dilate để cho phép slight misalign
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    ae_d = cv2.dilate(ae, k); pe_d = cv2.dilate(pe, k)
+    map_edge = np.abs(ae_d - pe_d)
+
+    # ── 4. Gradient magnitude diff ──
+    ag_f = ag.astype(np.float32); pg_f = pg.astype(np.float32)
+    gx_a = cv2.Sobel(ag_f,cv2.CV_32F,1,0,ksize=3)
+    gy_a = cv2.Sobel(ag_f,cv2.CV_32F,0,1,ksize=3)
+    gx_p = cv2.Sobel(pg_f,cv2.CV_32F,1,0,ksize=3)
+    gy_p = cv2.Sobel(pg_f,cv2.CV_32F,0,1,ksize=3)
+    mag_a = np.sqrt(gx_a**2+gy_a**2)
+    mag_p = np.sqrt(gx_p**2+gy_p**2)
+    map_grad = np.abs(mag_a-mag_p) / (np.maximum(mag_a,mag_p)+1e-6)
+    map_grad = np.clip(map_grad, 0, 1).astype(np.float32)
+
+    # ── 5. Local contrast diff ──
+    blur_a = cv2.GaussianBlur(ag_f,(5,5),0)
+    blur_p = cv2.GaussianBlur(pg_f,(5,5),0)
+    detail_a = np.abs(ag_f - blur_a)
+    detail_p = np.abs(pg_f - blur_p)
+    map_detail = np.abs(detail_a - detail_p) / 128.0
+    map_detail = np.clip(map_detail, 0, 1).astype(np.float32)
+
+    # ── Tổng hợp weighted ──
+    heat = (map_pixel * 0.30 +
+            map_ssim  * 0.25 +
+            map_edge  * 0.20 +
+            map_grad  * 0.15 +
+            map_detail* 0.10)
+    heat = np.clip(heat, 0, 1).astype(np.float32)
+
+    # Threshold adaptive
+    thresh_val = sensitivity / 100.0
+    binary = (heat > thresh_val).astype(np.uint8) * 255
+
+    # Morphological cleanup
+    k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2,2))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k2)
+    kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(4,4))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kc)
+
+    return heat, binary, pc
+
+# ── Phát hiện và phân loại defects từ binary map ────────────────────────────
+
+def extract_defects(binary, heat, aw_crop, print_crop, dpi, offset_x, offset_y):
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h, w = aw_crop.shape[:2]
     defects = []
+    min_area_px = math.pi * (mm_to_px(0.15, dpi))**2  # min 0.15mm radius
+
     for cnt in contours:
         area_px = cv2.contourArea(cnt)
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        max_dim_px = max(bw, bh)
-        min_dim_px = min(bw, bh)
-        aspect = max_dim_px / max(min_dim_px, 1)
+        if area_px < max(min_area_px, 2): continue
 
-        # Cho phép scratch mảnh dài dù area nhỏ
-        is_scratch = aspect > 6 and max_dim_px > mm_to_px(2.0, dpi_aw)
-        if area_px < min_area_px and not is_scratch:
-            continue
+        x,y,bw,bh = cv2.boundingRect(cnt)
+        aspect = max(bw,bh)/max(min(bw,bh),1)
 
-        # Phân loại
-        dtype = classify_defect(cnt, area_px, bw, bh, aw_img, aligned_print, dpi_aw)
-        if dtype is None:
-            continue
+        # Lấy mean heat score
+        mask = np.zeros(binary.shape, np.uint8)
+        cv2.drawContours(mask,[cnt],-1,255,-1)
+        mean_heat = float(cv2.mean(heat, mask=mask)[0])
 
-        # ── Tính kích thước thật ──
-        area_mm2   = area_px_to_mm2(area_px, dpi_aw)
-        diameter_mm = diameter_from_area_mm(area_mm2)
-        length_mm  = px_to_mm(max_dim_px, dpi_aw)
-        width_mm   = px_to_mm(min_dim_px, dpi_aw)
+        # Classify
+        dtype = _classify(cnt, area_px, bw, bh, aspect, aw_crop, print_crop, dpi)
+        if dtype is None: continue
 
-        # Chọn measurement phù hợp để phán định
-        if dtype in ('dot', 'spot', 'hickey'):
-            measurement = diameter_mm
-            size_str = f'⌀{diameter_mm:.2f}mm'
-        elif dtype in ('scratch', 'streak'):
-            measurement = length_mm
+        # Tính kích thước thật
+        area_mm2    = area_to_mm2(area_px, dpi)
+        diam_mm     = diameter_from_area_mm(area_mm2)
+        length_mm   = px_to_mm(max(bw,bh), dpi)
+        width_mm    = px_to_mm(min(bw,bh), dpi)
+
+        if dtype in ('dot','spot','hickey'):
+            measure = diam_mm
+            size_str = f'⌀{diam_mm:.2f}mm'
+        elif dtype in ('scratch','streak'):
+            measure = length_mm
             size_str = f'{length_mm:.2f}×{width_mm:.2f}mm'
         else:
-            measurement = area_mm2
+            measure = area_mm2
             size_str = f'{area_mm2:.3f}mm²'
 
-        verdict, threshold, unit = judge_defect(dtype, measurement)
-        if verdict == 'PASS':
-            continue  # Quá nhỏ, bỏ qua
-
-        # Severity từ verdict
-        severity = 'high' if verdict == 'FAIL' else 'medium'
-
-        # Mean diff
-        mask_roi = np.zeros(thresh_final.shape, np.uint8)
-        cv2.drawContours(mask_roi, [cnt], -1, 255, -1)
-        mean_diff = float(cv2.mean(diff, mask=mask_roi)[0])
+        verdict = judge(dtype, measure)
+        if verdict == 'PASS': continue
 
         defects.append({
             'type': dtype,
             'label': DEFECT_LABELS.get(dtype, dtype),
-            'x': int(x), 'y': int(y), 'w': int(bw), 'h': int(bh),
-            'area_px': int(area_px),
-            'area_mm2': round(area_mm2, 3),
-            'diameter_mm': round(diameter_mm, 3),
-            'length_mm': round(length_mm, 3),
-            'width_mm': round(width_mm, 3),
+            'x': int(x+offset_x), 'y': int(y+offset_y),
+            'w': int(bw), 'h': int(bh),
+            'area_mm2': round(area_mm2,3),
+            'diameter_mm': round(diam_mm,3),
+            'length_mm': round(length_mm,3),
+            'width_mm': round(width_mm,3),
             'size_str': size_str,
             'verdict': verdict,
-            'threshold_mm': threshold,
-            'severity': severity,
-            'mean_diff': round(mean_diff, 1),
+            'severity': 'high' if verdict=='FAIL' else 'medium',
+            'heat_score': round(mean_heat,3),
             'contour': cnt,
         })
+    return defects
 
-    return defects, thresh_final, dpi_effective
+def _classify(cnt, area_px, bw, bh, aspect, aw_crop, pr_crop, dpi):
+    perim = cv2.arcLength(cnt,True)
+    circ  = 4*math.pi*area_px/perim**2 if perim>0 else 0
 
-def classify_defect(cnt, area_px, bw, bh, aw_img, pr_img, dpi):
-    perimeter    = cv2.arcLength(cnt, True)
-    circularity  = 4 * math.pi * area_px / (perimeter**2) if perimeter > 0 else 0
-    aspect       = max(bw,bh) / max(min(bw,bh), 1)
-    max_dim_px   = max(bw, bh)
+    if aspect > 10 and max(bw,bh) > mm_to_px(2.5,dpi): return 'scratch'
+    if aspect > 4  and max(bw,bh) > mm_to_px(1.5,dpi): return 'streak'
+    if circ > 0.65 and bw < mm_to_px(3,dpi):           return 'hickey'
+    if circ > 0.5  and bw < mm_to_px(1.5,dpi):         return 'dot'
+    if circ > 0.35 and bw < mm_to_px(6,dpi):           return 'spot'
 
-    # Scratch: rất dài và mảnh
-    if aspect > 8 and max_dim_px > mm_to_px(3.0, dpi):
-        return 'scratch'
-    # Streak: dài vừa
-    if aspect > 4 and max_dim_px > mm_to_px(2.0, dpi):
-        return 'streak'
-    # Hickey: tròn nhỏ < 3mm
-    if circularity > 0.65 and bw < mm_to_px(3.0, dpi):
-        return 'hickey'
-    # Dot: tròn nhỏ < 1.5mm
-    if circularity > 0.5 and bw < mm_to_px(1.5, dpi):
-        return 'dot'
-    # Spot: blob vừa
-    if circularity > 0.35 and bw < mm_to_px(6.0, dpi):
-        return 'spot'
+    x,y,w2,h2 = cv2.boundingRect(cnt)
+    pc = cv2.resize(pr_crop, (aw_crop.shape[1], aw_crop.shape[0]))
+    ar = aw_crop[y:y+h2, x:x+w2]; pr = pc[y:y+h2, x:x+w2]
+    if ar.size == 0 or pr.size == 0: return 'anomaly'
+    am = float(np.mean(cv2.cvtColor(ar,cv2.COLOR_BGR2GRAY)))
+    pm = float(np.mean(cv2.cvtColor(pr,cv2.COLOR_BGR2GRAY)))
+    if pm > am+15: return 'missing_ink'
+    if pm < am-15: return 'extra_ink'
 
-    x, y, w2, h2 = cv2.boundingRect(cnt)
-    aw_roi = aw_img[y:y+h2, x:x+w2]
-    pr_roi = pr_img[y:y+h2, x:x+w2]
-    if aw_roi.size == 0 or pr_roi.size == 0:
-        return 'anomaly'
-
-    aw_mean = float(np.mean(cv2.cvtColor(aw_roi, cv2.COLOR_BGR2GRAY)))
-    pr_mean = float(np.mean(cv2.cvtColor(pr_roi, cv2.COLOR_BGR2GRAY)))
-
-    if pr_mean > aw_mean + 15: return 'missing_ink'
-    if pr_mean < aw_mean - 15: return 'extra_ink'
-
-    aw_lap = cv2.Laplacian(cv2.cvtColor(aw_roi, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
-    pr_lap = cv2.Laplacian(cv2.cvtColor(pr_roi, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
-    if pr_lap < aw_lap * 0.4:
-        return 'blur'
-
+    al = cv2.Laplacian(cv2.cvtColor(ar,cv2.COLOR_BGR2GRAY),cv2.CV_64F).var()
+    pl = cv2.Laplacian(cv2.cvtColor(pr,cv2.COLOR_BGR2GRAY),cv2.CV_64F).var()
+    if pl < al*0.4: return 'blur'
+    if area_px < mm_to_px(0.2,dpi)**2: return None
     return 'anomaly'
 
-DEFECT_LABELS = {
-    'dot':         'Dot / chấm mực',
-    'spot':        'Spot / đốm',
-    'hickey':      'Hickey',
-    'scratch':     'Xước / vệt dài',
-    'streak':      'Vệt / sọc',
-    'missing_ink': 'Thiếu mực / mất nét',
-    'extra_ink':   'Thừa mực / lem',
-    'blur':        'Nhòe / mờ',
-    'anomaly':     'Bất thường',
-}
+# ── Tạo 2 loại ảnh kết quả ──────────────────────────────────────────────────
 
-# ── Draw ──────────────────────────────────────────────────────────────────────
+def make_color_overlay(print_img, all_regions_defects):
+    """Ảnh tờ in với vùng lỗi tô màu."""
+    out = print_img.copy()
+    for i, d in enumerate(all_regions_defects):
+        color = DEFECT_COLORS_CV.get(d['type'], (180,180,180))
+        x,y,w,h = d['x'],d['y'],d['w'],d['h']
+        ih,iw = out.shape[:2]
+        x=max(0,x); y=max(0,y); w=min(w,iw-x); h=min(h,ih-y)
+        if w<=0 or h<=0: continue
 
-DEFECT_COLORS_CV = {
-    'dot':         (255, 220,   0),
-    'spot':        (  0, 200, 255),
-    'hickey':      (  0, 100, 255),
-    'scratch':     (255,  50, 200),
-    'streak':      (255, 140,   0),
-    'missing_ink': ( 50, 255,  50),
-    'extra_ink':   (255,  50,  50),
-    'blur':        (255, 255,   0),
-    'anomaly':     (180, 180, 180),
-    # text
-    'wrong_diacritic': (255,   0, 120),
-    'missing_punct':   (255,   0, 200),
-    'wrong_char':      (200,   0, 255),
-    'missing_word':    (255, 100,   0),
-}
+        ov = out.copy()
+        cv2.rectangle(ov,(x,y),(x+w,y+h),color,-1)
+        alpha = 0.35 if d['verdict']=='FAIL' else 0.22
+        cv2.addWeighted(ov,alpha,out,1-alpha,0,out)
+        thick = 3 if d['verdict']=='FAIL' else 2
+        cv2.rectangle(out,(x,y),(x+w,y+h),color,thick)
 
-def draw_defects(img, physical, text_defects):
-    out = img.copy()
-    ih, iw = out.shape[:2]
-    all_d = [('phys', d) for d in physical] + [('text', d) for d in text_defects]
-
-    for i, (kind, d) in enumerate(all_d):
-        color = DEFECT_COLORS_CV.get(d.get('type',''), (180,180,180))
-        x = max(0, d.get('x',0)); y = max(0, d.get('y',0))
-        w = min(d.get('w',20), iw-x); h = min(d.get('h',20), ih-y)
-        if w <= 0 or h <= 0: continue
-
-        overlay = out.copy()
-        cv2.rectangle(overlay, (x,y), (x+w,y+h), color, -1)
-        cv2.addWeighted(overlay, 0.28, out, 0.72, 0, out)
-
-        thick = 3 if d.get('verdict') == 'FAIL' or kind == 'text' else 2
-        cv2.rectangle(out, (x,y), (x+w,y+h), color, thick)
-
-        # Label với kích thước thật
-        size_info = d.get('size_str', '')
-        verdict   = d.get('verdict', '')
-        label = f"#{i+1} {d.get('label','?')}"
-        if size_info: label += f" {size_info}"
-        if verdict:   label += f" [{verdict}]"
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.4
-        (tw, th2), _ = cv2.getTextSize(label, font, scale, 1)
-        by = max(y - 3, th2 + 3)
-        cv2.rectangle(out, (x, by-th2-3), (x+tw+5, by+1), color, -1)
-        cv2.putText(out, label, (x+3, by-1), font, scale, (0,0,0), 1, cv2.LINE_AA)
+        label = f"#{i+1} {d['label']} {d['size_str']} [{d['verdict']}]"
+        font = cv2.FONT_HERSHEY_SIMPLEX; sc = 0.38
+        (tw,th),_ = cv2.getTextSize(label,font,sc,1)
+        by = max(y-3, th+3)
+        cv2.rectangle(out,(x,by-th-3),(x+tw+5,by+1),color,-1)
+        cv2.putText(out,label,(x+3,by-1),font,sc,(0,0,0),1,cv2.LINE_AA)
 
     return out
 
+def make_black_dot_map(print_img, all_regions_defects, heat_maps):
+    """
+    Ảnh nền đen, chỉ hiện điểm trắng tại vị trí lỗi.
+    Độ sáng ~ mức độ nghiêm trọng.
+    """
+    out = np.zeros(print_img.shape[:2], np.uint8)
+    for region_heat, rx, ry, rw, rh in heat_maps:
+        # Paste heat vào đúng vị trí
+        rh2 = min(rh, out.shape[0]-ry)
+        rw2 = min(rw, out.shape[1]-rx)
+        if rh2<=0 or rw2<=0: continue
+        heat_resized = cv2.resize((region_heat*255).astype(np.uint8),(rw2,rh2))
+        out[ry:ry+rh2, rx:rx+rw2] = np.maximum(out[ry:ry+rh2,rx:rx+rw2], heat_resized)
+
+    # Tăng contrast
+    out = cv2.normalize(out, None, 0, 255, cv2.NORM_MINMAX)
+    # Threshold thấp để chỉ hiện vùng có lỗi
+    _, out_thresh = cv2.threshold(out, 40, 255, cv2.THRESH_BINARY)
+    # Tô vòng tròn nhỏ tại tâm mỗi lỗi để dễ thấy
+    out_bgr = cv2.cvtColor(out_thresh, cv2.COLOR_GRAY2BGR)
+    for d in all_regions_defects:
+        cx = d['x'] + d['w']//2; cy = d['y'] + d['h']//2
+        r = max(d['w'],d['h'])//2 + 3
+        cv2.circle(out_bgr,(cx,cy),r,(255,255,255),1)
+    return out_bgr
+
 # ── Gemini text check ─────────────────────────────────────────────────────────
 
-def check_text_gemini(aw_img, aligned_print):
-    if not GEMINI_API_KEY:
-        return []
-    h, w = aw_img.shape[:2]
-    prompt = f"""So sánh Ảnh 1 (AW gốc chuẩn) và Ảnh 2 (tờ in, {w}×{h}px).
-Chỉ kiểm tra NỘI DUNG VĂN BẢN: dấu thanh tiếng Việt, dấu câu, ký tự sai/thiếu/thừa.
-JSON (chỉ JSON): {{"text_defects":[{{"type":"wrong_diacritic|missing_punct|extra_punct|wrong_char|missing_word","label":"tên VN","detail":"mô tả chi tiết","x":0,"y":0,"w":40,"h":25}}]}}"""
+def check_text_gemini(aw_img, print_img):
+    if not GEMINI_API_KEY: return []
+    h,w = aw_img.shape[:2]
+    prompt = f"""So sánh Ảnh 1 (AW gốc) và Ảnh 2 (tờ in, {w}×{h}px).
+Chỉ kiểm tra VĂN BẢN: dấu thanh (sắc/huyền/hỏi/ngã/nặng), dấu câu (./,/!/?) thừa/thiếu, ký tự sai.
+JSON: {{"text_defects":[{{"type":"wrong_diacritic|missing_punct|wrong_char","label":"tên VN","detail":"mô tả chi tiết cụ thể","x":0,"y":0,"w":30,"h":20}}]}}"""
     try:
         r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
             json={"contents":[{"parts":[
                 {"inline_data":{"mime_type":"image/jpeg","data":img_to_b64_jpeg(aw_img)}},
-                {"inline_data":{"mime_type":"image/jpeg","data":img_to_b64_jpeg(aligned_print)}},
+                {"inline_data":{"mime_type":"image/jpeg","data":img_to_b64_jpeg(print_img)}},
                 {"text":prompt}
-            ]}],"generationConfig":{"temperature":0.1,"maxOutputTokens":2000}},
-            timeout=45
-        )
+            ]}],"generationConfig":{"temperature":0.05,"maxOutputTokens":2000}},
+            timeout=45)
         raw = r.json().get('candidates',[{}])[0].get('content',{}).get('parts',[{}])[0].get('text','')
         return json.loads(raw.replace('```json','').replace('```','').strip()).get('text_defects',[])
     except Exception as e:
-        print(f"Gemini text error: {e}")
-        return []
+        print(f"Gemini err: {e}"); return []
 
 def get_ai_summary(all_defects):
-    if not GEMINI_API_KEY or not all_defects:
-        return None
-    lines = "\n".join([f"- #{i+1}: {d.get('label','?')} | {d.get('size_str','?')} | {d.get('verdict','?')}"
-                       for i, d in enumerate(all_defects)])
+    if not GEMINI_API_KEY or not all_defects: return None
+    lines = "\n".join([f"- #{i+1}: {d.get('label','?')} {d.get('size_str','')} [{d.get('verdict','?')}]"
+                       for i,d in enumerate(all_defects)])
     try:
         r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
             json={"contents":[{"parts":[{"text":
-                f"Chuyên gia QC in ấn. {len(all_defects)} lỗi:\n{lines}\n"
-                f"Báo cáo tiếng Việt ≤120 từ: đánh giá tổng thể, lỗi nghiêm trọng nhất, khuyến nghị."
-            }]}],"generationConfig":{"temperature":0.2,"maxOutputTokens":300}},
-            timeout=30
-        )
+                f"QC in ấn bao bì. Phát hiện {len(all_defects)} lỗi:\n{lines}\n"
+                f"Báo cáo tiếng Việt ≤100 từ: tổng thể, lỗi nguy hiểm nhất, khuyến nghị."}]}],
+                "generationConfig":{"temperature":0.2,"maxOutputTokens":300}},
+            timeout=30)
         return r.json().get('candidates',[{}])[0].get('content',{}).get('parts',[{}])[0].get('text','')
-    except:
-        return None
+    except: return None
 
-# ── Main endpoint ─────────────────────────────────────────────────────────────
+# ── API Endpoints ─────────────────────────────────────────────────────────────
 
 @app.route('/api/get_aw_info', methods=['POST','OPTIONS'])
-def get_aw_info():
-    """Đọc DPI/kích thước từ file AW trước khi phân tích."""
-    if request.method == 'OPTIONS': return '',204
-    data = request.get_json()
-    b64  = data.get('fileData','')
-    ftype = data.get('fileType','image')  # 'pdf' or 'image'
-    info = extract_aw_info(b64, ftype)
-    # Không trả về img_cv2 (binary)
-    return jsonify({k:v for k,v in info.items() if k not in ('img_cv2','rendered_b64')})
+def api_get_aw_info():
+    if request.method=='OPTIONS': return '',204
+    d = request.get_json()
+    info = get_aw_dpi(d.get('fileData',''), d.get('fileType','image'))
+    return jsonify({k:v for k,v in info.items() if k not in ('img_cv2',)})
 
 @app.route('/api/analyze', methods=['POST','OPTIONS'])
 def analyze():
-    if request.method == 'OPTIONS': return '',204
+    if request.method=='OPTIONS': return '',204
     data = request.get_json()
     if not data: return jsonify({'error':'No data'}),400
 
-    aw_b64      = data.get('awImage')
-    print_b64   = data.get('printImage')
-    aw_file_b64 = data.get('awFileData')   # file gốc (PDF/PNG full)
-    aw_type     = data.get('awFileType','image')
-    sensitivity = int(data.get('sensitivity', 28))
-    check_text  = data.get('checkText', True)
-    manual_dpi  = data.get('manualDpi', None)  # user nhập tay nếu không đọc được
+    aw_b64       = data.get('awImage')       # vùng AW đã crop từ canvas
+    print_b64    = data.get('printImage')    # ảnh tờ in đầy đủ
+    aw_file_b64  = data.get('awFileData')    # file AW gốc (PDF/PNG) để lấy DPI
+    aw_type      = data.get('awFileType','image')
+    sensitivity  = int(data.get('sensitivity', 30))
+    check_text   = data.get('checkText', True)
+    manual_dpi   = data.get('manualDpi', None)
 
     if not aw_b64 or not print_b64:
         return jsonify({'error':'Thiếu ảnh'}),400
 
     try:
-        # ── Lấy DPI từ file AW gốc ──
-        aw_info = {'dpi': None, 'width_mm': None, 'source': 'none'}
-        aw_cv2_hires = None
-
+        # ── DPI ──
+        aw_info = {}
         if aw_file_b64:
-            aw_info = extract_aw_info(aw_file_b64, aw_type)
-            aw_cv2_hires = aw_info.get('img_cv2')
+            aw_info = get_aw_dpi(aw_file_b64, aw_type)
+        dpi = float(manual_dpi) if manual_dpi else (aw_info.get('dpi') or 150.0)
 
-        if manual_dpi:
-            aw_info['dpi'] = float(manual_dpi)
-            aw_info['source'] = f'manual_{manual_dpi}dpi'
-
-        # Fallback nếu vẫn không có DPI
-        dpi_aw = aw_info.get('dpi') or 150.0
-
-        # ── Decode ảnh hiển thị (canvas) ──
-        aw_canvas   = b64_to_cv2(aw_b64)
-        print_canvas = b64_to_cv2(print_b64)
-        if aw_canvas is None or print_canvas is None:
+        # ── Decode ──
+        aw_region  = b64_to_cv2(aw_b64)    # vùng mẫu từ AW
+        print_full = b64_to_cv2(print_b64)  # tờ in đầy đủ
+        if aw_region is None or print_full is None:
             return jsonify({'error':'Không đọc được ảnh'}),400
 
-        # Dùng ảnh hi-res nếu có (từ PDF render)
-        aw_img = aw_cv2_hires if aw_cv2_hires is not None else aw_canvas
+        # ── Tìm tất cả vùng giống AW trên tờ in ──
+        regions = find_layout_regions(aw_region, print_full, threshold=0.50)
+        if not regions:
+            # Fallback: dùng toàn bộ ảnh in
+            h,w = print_full.shape[:2]
+            regions = [(0, 0, w, h, 1.0)]
 
-        # Resize print để match AW
-        h_aw, w_aw = aw_img.shape[:2]
-        print_resized = cv2.resize(print_canvas,
-                                    (w_aw, h_aw) if aw_cv2_hires is not None else (print_canvas.shape[1], print_canvas.shape[0]))
+        # ── So sánh từng vùng ──
+        all_defects   = []
+        heat_maps     = []
 
-        # ── Align ──
-        aligned, scale_factor = align_images(aw_img, print_resized)
+        for (rx, ry, rw, rh, score) in regions:
+            # Crop vùng tương ứng trên tờ in
+            rh2 = min(rh, print_full.shape[0]-ry)
+            rw2 = min(rw, print_full.shape[1]-rx)
+            if rh2<10 or rw2<10: continue
+            print_crop = print_full[ry:ry+rh2, rx:rx+rw2]
+            aw_resized = cv2.resize(aw_region, (rw2, rh2))
 
-        # ── Physical defects ──
-        physical, diff_map, dpi_effective = detect_defects(
-            aw_img, aligned, sensitivity, dpi_aw, scale_factor
-        )
+            # 5-method comparison
+            heat, binary, print_aligned = compare_region(
+                aw_resized, print_crop, dpi, sensitivity
+            )
+            heat_maps.append((heat, rx, ry, rw2, rh2))
 
-        # ── Text check ──
-        text_defects = check_text_gemini(aw_img, aligned) if check_text and GEMINI_API_KEY else []
+            # Extract defects
+            region_defects = extract_defects(
+                binary, heat, aw_resized, print_aligned, dpi, rx, ry
+            )
+            all_defects.extend(region_defects)
 
-        # ── Draw ──
-        result_img = draw_defects(aligned, physical, text_defects)
+        # ── Text check (Gemini) ──
+        text_defects = []
+        if check_text and GEMINI_API_KEY and regions:
+            # Dùng vùng đầu tiên để check text
+            rx,ry,rw,rh,_ = regions[0]
+            rh2=min(rh,print_full.shape[0]-ry); rw2=min(rw,print_full.shape[1]-rx)
+            pc = print_full[ry:ry+rh2, rx:rx+rw2]
+            ar = cv2.resize(aw_region,(rw2,rh2))
+            text_defects = check_text_gemini(ar, pc)
+            # Offset tọa độ
+            for td in text_defects:
+                td['x'] = td.get('x',0)+rx; td['y'] = td.get('y',0)+ry
+                td['verdict'] = 'FAIL'; td['size_str'] = td.get('detail','')
 
-        # ── Encode ──
-        result_b64 = cv2_to_b64(result_img)
-        diff_b64   = cv2_to_b64(diff_map)
+        # ── Tạo 2 loại ảnh output ──
+        combined = all_defects + text_defects
+        result_color = make_color_overlay(print_full, combined)
+        result_dotmap = make_black_dot_map(print_full, combined, heat_maps)
 
-        # ── AI Summary ──
-        all_d = physical + [dict(d, size_str=d.get('detail',''), verdict='FAIL') for d in text_defects]
-        ai_summary = get_ai_summary(all_d) if all_d else None
+        # ── AI summary ──
+        ai_summary = get_ai_summary(combined) if combined else None
 
-        physical_out = [{k:v for k,v in d.items() if k != 'contour'} for d in physical]
+        # ── Verdicts ──
+        fail_c = sum(1 for d in combined if d.get('verdict')=='FAIL')
+        warn_c = sum(1 for d in combined if d.get('verdict')=='WARN')
+        verdict = 'FAIL' if fail_c>0 else ('WARN' if warn_c>0 else 'PASS')
 
-        # ── Verdict tổng thể ──
-        fail_count = sum(1 for d in physical if d['verdict']=='FAIL') + len(text_defects)
-        warn_count = sum(1 for d in physical if d['verdict']=='WARN')
-        if fail_count > 0:   verdict = 'FAIL'
-        elif warn_count > 0: verdict = 'WARN'
-        else:                verdict = 'PASS'
+        phys_out = [{k:v for k,v in d.items() if k!='contour'} for d in all_defects]
+        text_out = [dict(d, is_text=True, severity='high') for d in text_defects]
 
         return jsonify({
             'verdict':        verdict,
-            'defect_count':   len(all_d),
-            'fail_count':     fail_count,
-            'warn_count':     warn_count,
-            'physical_count': len(physical),
+            'defect_count':   len(combined),
+            'fail_count':     fail_c,
+            'warn_count':     warn_c,
+            'physical_count': len(all_defects),
             'text_count':     len(text_defects),
-            'defects':        physical_out + [dict(d, is_text=True) for d in text_defects],
-            'result_image':   result_b64,
-            'diff_image':     diff_b64,
-            'ai_summary':     ai_summary,
-            'dpi_aw':         round(dpi_aw, 1),
-            'dpi_effective':  round(dpi_effective, 1),
-            'scale_factor':   round(scale_factor, 3),
+            'layout_count':   len(regions),
+            'defects':        phys_out + text_out,
+            'result_color':   cv2_to_b64(result_color),
+            'result_dotmap':  cv2_to_b64(result_dotmap),
+            'dpi_aw':         round(dpi,1),
             'aw_size':        f"{aw_info.get('width_mm','?')}×{aw_info.get('height_mm','?')}mm",
-            'dpi_source':     aw_info.get('source','?'),
+            'dpi_source':     aw_info.get('source','fallback'),
+            'ai_summary':     ai_summary,
         })
 
     except Exception as e:
@@ -608,11 +537,11 @@ def analyze():
 @app.route('/', defaults={'path':''})
 @app.route('/<path:path>')
 def serve(path):
-    if path and os.path.exists(os.path.join(app.static_folder, path)):
+    if path and os.path.exists(os.path.join(app.static_folder,path)):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, 'index.html')
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    print(f'QC Inspector Pro running at http://localhost:{port}')
+if __name__=='__main__':
+    port = int(os.environ.get('PORT',8080))
+    print(f'QC Pro running at http://localhost:{port}')
     app.run(host='0.0.0.0', port=port, debug=False)
