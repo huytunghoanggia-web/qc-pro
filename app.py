@@ -8,6 +8,7 @@ import requests
 import json
 from io import BytesIO
 from PIL import Image
+import math
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
@@ -17,59 +18,66 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def b64_to_cv2(b64_str):
-    """Decode base64 image to OpenCV BGR array."""
     data = base64.b64decode(b64_str)
     arr = np.frombuffer(data, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     return img
 
 def cv2_to_b64(img):
-    """Encode OpenCV image to base64 PNG."""
     _, buf = cv2.imencode('.png', img)
     return base64.b64encode(buf).decode('utf-8')
 
 def pil_to_b64(pil_img):
     buf = BytesIO()
-    pil_img.save(buf, format='JPEG', quality=90)
+    pil_img.save(buf, format='JPEG', quality=92)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-def resize_keep_aspect(img, max_dim=2000):
+def img_to_b64_jpeg(img):
+    """CV2 image to base64 JPEG for Gemini."""
+    _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return base64.b64encode(buf).decode('utf-8')
+
+def resize_keep_aspect(img, max_dim=2400):
     h, w = img.shape[:2]
     scale = min(max_dim / w, max_dim / h, 1.0)
     if scale < 1.0:
         img = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
-    return img
+    return img, scale
 
-# ─── Step 1: Align print to AW using feature matching ───────────────────────
+def estimate_dpi(img_shape, physical_width_mm=210):
+    """Estimate DPI assuming image is A4 width by default."""
+    w = img_shape[1]
+    dpi = w / (physical_width_mm / 25.4)
+    return max(dpi, 72)
+
+def mm2_to_px2(mm2, dpi):
+    """Convert mm² to pixel²."""
+    px_per_mm = dpi / 25.4
+    return mm2 * (px_per_mm ** 2)
+
+# ─── Step 1: Align ───────────────────────────────────────────────────────────
 
 def align_images(aw_img, print_img):
-    """
-    Align print_img to aw_img using ORB feature matching + homography.
-    Returns aligned print image (same size as aw_img).
-    """
     aw_gray = cv2.cvtColor(aw_img, cv2.COLOR_BGR2GRAY)
     pr_gray = cv2.cvtColor(print_img, cv2.COLOR_BGR2GRAY)
 
-    # Try SIFT first, fall back to ORB
     try:
-        detector = cv2.SIFT_create(nfeatures=2000)
+        detector = cv2.SIFT_create(nfeatures=3000)
         norm = cv2.NORM_L2
     except Exception:
-        detector = cv2.ORB_create(nfeatures=2000)
+        detector = cv2.ORB_create(nfeatures=3000)
         norm = cv2.NORM_HAMMING
 
     kp1, des1 = detector.detectAndCompute(aw_gray, None)
     kp2, des2 = detector.detectAndCompute(pr_gray, None)
 
     if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-        # Can't align — return resized print
         h, w = aw_img.shape[:2]
         return cv2.resize(print_img, (w, h))
 
     bf = cv2.BFMatcher(norm, crossCheck=False)
     try:
         matches = bf.knnMatch(des1, des2, k=2)
-        # Lowe's ratio test
         good = []
         for m_n in matches:
             if len(m_n) == 2:
@@ -85,8 +93,8 @@ def align_images(aw_img, print_img):
 
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
+    H, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
 
-    H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
     if H is None:
         h, w = aw_img.shape[:2]
         return cv2.resize(print_img, (w, h))
@@ -97,34 +105,48 @@ def align_images(aw_img, print_img):
                                    borderMode=cv2.BORDER_REPLICATE)
     return aligned
 
-# ─── Step 2: Pixel-level diff and defect detection ──────────────────────────
+# ─── Step 2: Physical defect detection (OpenCV) ──────────────────────────────
 
-def detect_defects(aw_img, aligned_print, sensitivity=35):
+def detect_physical_defects(aw_img, aligned_print, sensitivity, dpi):
     """
-    Compare AW and aligned print pixel-by-pixel.
-    Returns list of defect regions with bounding boxes and types.
+    Detect physical print defects: spot, dot, hickey, scratch, streak, blur, missing ink.
+    Min area: 0.5mm² converted to pixels.
     """
-    # Convert to LAB color space (better perceptual diff)
-    aw_lab  = cv2.cvtColor(aw_img, cv2.COLOR_BGR2LAB).astype(np.float32)
-    pr_lab  = cv2.cvtColor(aligned_print, cv2.COLOR_BGR2LAB).astype(np.float32)
+    # Min area in pixels² (0.5mm²)
+    min_area_px = mm2_to_px2(0.5, dpi)
+    # For very thin scratches: min length in pixels (0.2mm width × 5mm length)
+    min_scratch_length_px = (5.0 / 25.4) * dpi   # 5mm in pixels
+    min_scratch_width_px  = (0.1 / 25.4) * dpi   # 0.1mm min width
 
-    # Weighted diff (L channel more important)
+    # ── Color diff in LAB ──
+    aw_lab = cv2.cvtColor(aw_img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    pr_lab = cv2.cvtColor(aligned_print, cv2.COLOR_BGR2LAB).astype(np.float32)
+
     diff_L = np.abs(aw_lab[:,:,0] - pr_lab[:,:,0]) * 1.5
     diff_A = np.abs(aw_lab[:,:,1] - pr_lab[:,:,1])
     diff_B = np.abs(aw_lab[:,:,2] - pr_lab[:,:,2])
     diff   = (diff_L + diff_A + diff_B) / 3.0
 
-    # Threshold
+    # ── Threshold ──
     thresh = (diff > sensitivity).astype(np.uint8) * 255
 
-    # Remove noise with morphological ops
-    kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN,  kernel_open)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
+    # ── Morphological: remove salt-pepper noise, keep thin lines ──
+    # Open with tiny kernel to remove 1-2px noise
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    thresh_clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k_open)
 
-    # Find contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Close small gaps in scratches/streaks
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 2))
+    thresh_h = cv2.morphologyEx(thresh_clean, cv2.MORPH_CLOSE, k_close)
+    k_close2 = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 5))
+    thresh_v = cv2.morphologyEx(thresh_clean, cv2.MORPH_CLOSE, k_close2)
+    thresh_lines = cv2.bitwise_or(thresh_h, thresh_v)
+
+    # Final: combine both
+    thresh_final = cv2.bitwise_or(thresh_clean, thresh_lines)
+
+    # ── Find contours ──
+    contours, _ = cv2.findContours(thresh_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     h, w = aw_img.shape[:2]
     total_area = h * w
@@ -132,25 +154,29 @@ def detect_defects(aw_img, aligned_print, sensitivity=35):
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 20:  # ignore tiny noise
+
+        # Check min area (0.5mm²) — BUT allow thin scratches even if area < 0.5mm²
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        aspect = max(bw, bh) / max(min(bw, bh), 1)
+        max_dim_px = max(bw, bh)
+
+        is_long_scratch = (aspect > 8 and max_dim_px > min_scratch_length_px and min(bw, bh) >= max(min_scratch_width_px, 1))
+        if area < min_area_px and not is_long_scratch:
             continue
 
-        x, y, bw, bh = cv2.boundingRect(cnt)
-
-        # Classify defect type by shape
-        defect_type = classify_defect(cnt, area, bw, bh, total_area, aw_img, aligned_print)
+        defect_type = classify_physical_defect(cnt, area, bw, bh, total_area, aw_img, aligned_print, dpi)
         if defect_type is None:
             continue
 
-        # Compute mean diff intensity in region
-        mask_roi = np.zeros(thresh.shape, np.uint8)
+        mask_roi = np.zeros(thresh_final.shape, np.uint8)
         cv2.drawContours(mask_roi, [cnt], -1, 255, -1)
         mean_diff = float(cv2.mean(diff, mask=mask_roi)[0])
 
-        # Severity
-        if mean_diff > 80 or area > total_area * 0.005:
+        # Severity based on area in mm² and diff intensity
+        area_mm2 = area / mm2_to_px2(1.0, dpi)
+        if mean_diff > 70 or area_mm2 > 5:
             severity = 'high'
-        elif mean_diff > 50 or area > total_area * 0.001:
+        elif mean_diff > 45 or area_mm2 > 1:
             severity = 'medium'
         else:
             severity = 'low'
@@ -158,145 +184,144 @@ def detect_defects(aw_img, aligned_print, sensitivity=35):
         defects.append({
             'type': defect_type['type'],
             'label': defect_type['label'],
-            'x': int(x),
-            'y': int(y),
-            'w': int(bw),
-            'h': int(bh),
+            'x': int(x), 'y': int(y), 'w': int(bw), 'h': int(bh),
             'area': int(area),
+            'area_mm2': round(area_mm2, 3),
             'severity': severity,
             'mean_diff': round(mean_diff, 1),
             'contour': cnt
         })
 
-    return defects, thresh
+    return defects, thresh_final
 
-def classify_defect(cnt, area, bw, bh, total_area, aw_img, pr_img):
-    """Classify defect type based on shape, size and context."""
-    # Aspect ratio
-    aspect = bw / bh if bh > 0 else 1.0
-    # Circularity
+def classify_physical_defect(cnt, area, bw, bh, total_area, aw_img, pr_img, dpi):
+    aspect = max(bw, bh) / max(min(bw, bh), 1)
     perimeter = cv2.arcLength(cnt, True)
     circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-
-    # Relative size
     rel_size = area / total_area
 
-    # Hickey: small circular ring-like defect
-    if circularity > 0.6 and area < total_area * 0.002 and bw < 60 and bh < 60:
-        return {'type': 'hickey', 'label': 'Hickey'}
+    # Min scratch length: 3mm
+    min_scratch_px = (3.0 / 25.4) * dpi
 
-    # Spot / ink spot: small roughly circular blob
-    if circularity > 0.5 and area < total_area * 0.005 and max(bw, bh) < 80:
-        return {'type': 'spot', 'label': 'Spot / đốm mực'}
+    # ── Scratch / Vệt xước: rất dài và mảnh ──
+    if aspect > 8 and max(bw, bh) > min_scratch_px:
+        return {'type': 'scratch', 'label': 'Xước / vệt dài'}
 
-    # Streak / vệt: very elongated
-    if aspect > 5 or aspect < 0.2:
+    # ── Streak / Sọc: dài vừa ──
+    if aspect > 4 and max(bw, bh) > min_scratch_px * 0.5:
         return {'type': 'streak', 'label': 'Vệt / sọc'}
 
-    # Scratch / xước: thin elongated
-    if (aspect > 3 or aspect < 0.33) and area < total_area * 0.01:
-        return {'type': 'scratch', 'label': 'Xước / trầy'}
+    # ── Hickey: vòng tròn nhỏ đặc trưng ──
+    if circularity > 0.65 and bw < (3.0/25.4)*dpi and bh < (3.0/25.4)*dpi:
+        return {'type': 'hickey', 'label': 'Hickey'}
 
-    # Missing ink / thiếu nét: large area lighter than AW
+    # ── Dot: chấm nhỏ tròn ──
+    if circularity > 0.5 and bw < (2.0/25.4)*dpi and bh < (2.0/25.4)*dpi:
+        return {'type': 'dot', 'label': 'Dot / chấm mực'}
+
+    # ── Spot: blob tròn vừa ──
+    if circularity > 0.4 and bw < (5.0/25.4)*dpi:
+        return {'type': 'spot', 'label': 'Spot / đốm'}
+
+    # ── So sánh sáng/tối để phát hiện mất mực hoặc thừa mực ──
     x, y, w2, h2 = cv2.boundingRect(cnt)
-    aw_roi  = aw_img[y:y+h2, x:x+w2]
-    pr_roi  = pr_img[y:y+h2, x:x+w2]
-    aw_mean = float(np.mean(cv2.cvtColor(aw_roi, cv2.COLOR_BGR2GRAY))) if aw_roi.size > 0 else 128
-    pr_mean = float(np.mean(cv2.cvtColor(pr_roi, cv2.COLOR_BGR2GRAY))) if pr_roi.size > 0 else 128
+    aw_roi = aw_img[y:y+h2, x:x+w2]
+    pr_roi = pr_img[y:y+h2, x:x+w2]
+    if aw_roi.size == 0 or pr_roi.size == 0:
+        return {'type': 'anomaly', 'label': 'Bất thường'}
 
-    if pr_mean > aw_mean + 20:
-        if rel_size > 0.002:
-            return {'type': 'missing_ink', 'label': 'Thiếu nét / mất mực'}
-        else:
-            return {'type': 'mat_net', 'label': 'Mất nét chữ'}
+    aw_mean = float(np.mean(cv2.cvtColor(aw_roi, cv2.COLOR_BGR2GRAY)))
+    pr_mean = float(np.mean(cv2.cvtColor(pr_roi, cv2.COLOR_BGR2GRAY)))
 
-    # Extra ink / thừa mực
-    if pr_mean < aw_mean - 20:
-        return {'type': 'extra_ink', 'label': 'Thừa mực / lem mực'}
+    if pr_mean > aw_mean + 15:
+        return {'type': 'missing_ink', 'label': 'Thiếu mực / mất nét'}
+    if pr_mean < aw_mean - 15:
+        return {'type': 'extra_ink', 'label': 'Thừa mực / lem'}
 
-    # Blur / nhòe
-    aw_lap  = cv2.Laplacian(cv2.cvtColor(aw_roi,  cv2.COLOR_BGR2GRAY), cv2.CV_64F).var() if aw_roi.size > 0 else 100
-    pr_lap  = cv2.Laplacian(cv2.cvtColor(pr_roi,  cv2.COLOR_BGR2GRAY), cv2.CV_64F).var() if pr_roi.size > 0 else 100
-    if pr_lap < aw_lap * 0.5:
-        return {'type': 'blur', 'label': 'Nhòe / mờ chữ'}
+    # ── Blur: giảm độ sắc nét ──
+    aw_lap = cv2.Laplacian(cv2.cvtColor(aw_roi, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
+    pr_lap = cv2.Laplacian(cv2.cvtColor(pr_roi, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
+    if pr_lap < aw_lap * 0.45:
+        return {'type': 'blur', 'label': 'Nhòe / mờ'}
 
-    # General anomaly
-    if rel_size < 0.0001:
-        return None  # too small, skip
+    if rel_size < 0.00005:
+        return None
     return {'type': 'anomaly', 'label': 'Bất thường'}
 
-# ─── Step 3: Draw results on image ──────────────────────────────────────────
+# ─── Step 3: Text/diacritic check via Gemini ─────────────────────────────────
 
-DEFECT_COLORS = {
-    'hickey':       (0,   100, 255),
-    'spot':         (0,   200, 255),
-    'streak':       (255, 100,   0),
-    'scratch':      (180,   0, 255),
-    'missing_ink':  (0,   255, 150),
-    'mat_net':      (0,   255,  80),
-    'extra_ink':    (255,  50,  50),
-    'blur':         (255, 200,   0),
-    'anomaly':      (200, 200, 200),
-}
+def check_text_with_gemini(aw_img, aligned_print, physical_defects):
+    """
+    Use Gemini to check text content, diacritics, punctuation differences.
+    Returns list of text defects with approximate locations.
+    """
+    if not GEMINI_API_KEY:
+        return []
 
-def draw_defects(img, defects):
-    out = img.copy()
-    for i, d in enumerate(defects):
-        color = DEFECT_COLORS.get(d['type'], (200, 200, 200))
-        x, y, w, h = d['x'], d['y'], d['w'], d['h']
+    aw_b64    = img_to_b64_jpeg(aw_img)
+    print_b64 = img_to_b64_jpeg(aligned_print)
+    h, w = aw_img.shape[:2]
 
-        # Filled semi-transparent overlay
-        overlay = out.copy()
-        cv2.rectangle(overlay, (x, y), (x+w, y+h), color, -1)
-        cv2.addWeighted(overlay, 0.25, out, 0.75, 0, out)
+    prompt = f"""Bạn là chuyên gia QC in ấn bao bì. So sánh 2 ảnh:
+- Ảnh 1: Artwork gốc (AW) — CHUẨN
+- Ảnh 2: Tờ in thực tế — cần kiểm tra
 
-        # Border
-        thick = 3 if d['severity'] == 'high' else 2
-        cv2.rectangle(out, (x, y), (x+w, y+h), color, thick)
+CHỈ kiểm tra NỘI DUNG VĂN BẢN (KHÔNG cần báo lỗi vật lý như vệt, đốm):
+1. Dấu thanh tiếng Việt: sắc/huyền/hỏi/ngã/nặng có đúng không?
+2. Dấu câu: chấm (.) phẩy (,) chấm than (!) — thừa/thiếu không?
+3. Chữ cái sai, số sai, từ thiếu/thừa
 
-        # Label badge
-        label = f"#{i+1} {d['label']}"
-        font_scale = 0.45
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        (tw, th), _ = cv2.getTextSize(label, font, font_scale, 1)
-        by = max(y - 4, th + 4)
-        cv2.rectangle(out, (x, by - th - 4), (x + tw + 6, by + 2), color, -1)
-        cv2.putText(out, label, (x + 3, by - 2), font, font_scale, (0, 0, 0), 1, cv2.LINE_AA)
+Ảnh có kích thước {w}x{h} pixels.
 
-    return out
-
-# ─── Step 4: Gemini description ─────────────────────────────────────────────
-
-def describe_defects_with_gemini(defects, aw_b64, result_b64):
-    if not GEMINI_API_KEY or not defects:
-        return None
-
-    summary_list = "\n".join([
-        f"- Lỗi #{i+1}: {d['label']} (mức độ: {d['severity']}, diện tích: {d['area']}px²)"
-        for i, d in enumerate(defects)
-    ])
-
-    prompt = f"""Bạn là chuyên gia QC ngành in ấn bao bì.
-Tôi đã dùng Computer Vision phát hiện được {len(defects)} bất thường khi so sánh Artwork gốc với tờ in thực tế.
-
-Danh sách lỗi phát hiện:
-{summary_list}
-
-Hãy viết báo cáo QC ngắn gọn bằng tiếng Việt:
-1. Đánh giá tổng thể tờ in
-2. Lỗi nghiêm trọng nhất cần xử lý ngay
-3. Khuyến nghị hành động (in lại / có thể chấp nhận / cần kiểm tra thêm)
-
-Trả lời ngắn gọn, không quá 150 từ."""
+Trả về JSON (CHỈ JSON):
+{{"text_defects":[{{"type":"wrong_diacritic|missing_punct|extra_punct|wrong_char|missing_word|extra_word","label":"tên tiếng Việt","detail":"mô tả: chữ gì, sai thành gì","x":0,"y":0,"w":50,"h":30}}]}}
+Nếu không có lỗi văn bản: {{"text_defects":[]}}"""
 
     try:
         body = {
             "contents": [{"parts": [
                 {"inline_data": {"mime_type": "image/jpeg", "data": aw_b64}},
-                {"inline_data": {"mime_type": "image/png",  "data": result_b64}},
+                {"inline_data": {"mime_type": "image/jpeg", "data": print_b64}},
                 {"text": prompt}
             ]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 400}
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000}
+        }
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json=body, timeout=45
+        )
+        data = r.json()
+        raw = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+        cleaned = raw.replace('```json', '').replace('```', '').strip()
+        result = json.loads(cleaned)
+        return result.get('text_defects', [])
+    except Exception as e:
+        print(f"Gemini text check error: {e}")
+        return []
+
+# ─── Step 4: AI Summary ──────────────────────────────────────────────────────
+
+def get_ai_summary(all_defects, aw_img):
+    if not GEMINI_API_KEY or not all_defects:
+        return None
+
+    summary_list = "\n".join([
+        f"- #{i+1}: {d.get('label','?')} | mức độ: {d.get('severity','?')} | {d.get('detail') or d.get('area_mm2','')}"
+        for i, d in enumerate(all_defects)
+    ])
+
+    prompt = f"""Chuyên gia QC in ấn bao bì. Phát hiện {len(all_defects)} lỗi:
+{summary_list}
+
+Viết báo cáo QC tiếng Việt ngắn gọn (tối đa 120 từ):
+1. Đánh giá tổng thể
+2. Lỗi nghiêm trọng nhất
+3. Khuyến nghị: in lại / chấp nhận / kiểm tra thêm"""
+
+    try:
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 300}
         }
         r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
@@ -305,9 +330,69 @@ Trả lời ngắn gọn, không quá 150 từ."""
         data = r.json()
         return data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
     except Exception as e:
-        return f"(Không lấy được nhận xét AI: {e})"
+        return f"(Lỗi AI: {e})"
 
-# ─── Main API endpoint ───────────────────────────────────────────────────────
+# ─── Step 5: Draw all defects ────────────────────────────────────────────────
+
+DEFECT_COLORS = {
+    'scratch':      (255,  80, 200),
+    'streak':       (255, 140,   0),
+    'hickey':       (  0, 100, 255),
+    'dot':          (  0, 220, 255),
+    'spot':         (  0, 255, 180),
+    'missing_ink':  ( 50, 255,  50),
+    'extra_ink':    (255,  50,  50),
+    'blur':         (255, 220,   0),
+    'anomaly':      (180, 180, 180),
+    # Text defects
+    'wrong_diacritic': (255,   0, 100),
+    'missing_punct':   (255,   0, 200),
+    'extra_punct':     (200,   0, 255),
+    'wrong_char':      (255,  50, 150),
+    'missing_word':    (255, 100,   0),
+    'extra_word':      (200, 100,  50),
+}
+
+def draw_all_defects(img, physical_defects, text_defects):
+    out = img.copy()
+    all_d = list(physical_defects) + [dict(d, **{'is_text': True}) for d in text_defects]
+
+    for i, d in enumerate(all_d):
+        color = DEFECT_COLORS.get(d.get('type', ''), (200, 200, 200))
+        x, y = d.get('x', 0), d.get('y', 0)
+        w, h = d.get('w', 20), d.get('h', 20)
+
+        # Clamp to image bounds
+        ih, iw = out.shape[:2]
+        x, y = max(0, x), max(0, y)
+        w, h = min(w, iw-x), min(h, ih-y)
+        if w <= 0 or h <= 0:
+            continue
+
+        # Semi-transparent fill
+        overlay = out.copy()
+        cv2.rectangle(overlay, (x, y), (x+w, y+h), color, -1)
+        alpha = 0.35 if d.get('is_text') else 0.25
+        cv2.addWeighted(overlay, alpha, out, 1-alpha, 0, out)
+
+        # Border — thicker for text errors, dashed-style for physical
+        thick = 3 if d.get('severity') == 'high' or d.get('is_text') else 2
+        cv2.rectangle(out, (x, y), (x+w, y+h), color, thick)
+
+        # Label
+        label = f"#{i+1} {d.get('label', '?')}"
+        if d.get('is_text'):
+            label += ' [T]'
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.42
+        (tw, th2), _ = cv2.getTextSize(label, font, scale, 1)
+        by = max(y - 3, th2 + 3)
+        cv2.rectangle(out, (x, by - th2 - 3), (x + tw + 5, by + 1), color, -1)
+        cv2.putText(out, label, (x+3, by-1), font, scale, (0, 0, 0), 1, cv2.LINE_AA)
+
+    return out
+
+# ─── Main API ────────────────────────────────────────────────────────────────
 
 @app.route('/api/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
@@ -320,59 +405,71 @@ def analyze():
 
     aw_b64    = data.get('awImage')
     print_b64 = data.get('printImage')
-    sensitivity = int(data.get('sensitivity', 35))
+    sensitivity   = int(data.get('sensitivity', 30))
+    check_text    = data.get('checkText', True)
+    dpi_override  = data.get('dpi', None)
 
     if not aw_b64 or not print_b64:
         return jsonify({'error': 'Thiếu ảnh'}), 400
 
     try:
-        # Decode images
         aw_img    = b64_to_cv2(aw_b64)
         print_img = b64_to_cv2(print_b64)
 
         if aw_img is None or print_img is None:
             return jsonify({'error': 'Không đọc được ảnh'}), 400
 
-        # Resize to max 2000px
-        aw_img    = resize_keep_aspect(aw_img,    2000)
-        print_img = resize_keep_aspect(print_img, 2000)
+        # Resize — keep high resolution for better detection
+        aw_img,    scale_aw    = resize_keep_aspect(aw_img,    2400)
+        print_img, scale_print = resize_keep_aspect(print_img, 2400)
 
-        # Step 1: Align
+        # Estimate DPI
+        dpi = float(dpi_override) if dpi_override else estimate_dpi(aw_img.shape)
+
+        # Align
         aligned = align_images(aw_img, print_img)
 
-        # Step 2: Detect defects
-        defects, diff_map = detect_defects(aw_img, aligned, sensitivity)
+        # Physical defects (OpenCV)
+        physical_defects, diff_map = detect_physical_defects(aw_img, aligned, sensitivity, dpi)
 
-        # Step 3: Draw results
-        result_img = draw_defects(aligned, defects)
+        # Text/diacritic check (Gemini) — run in parallel conceptually
+        text_defects = []
+        if check_text and GEMINI_API_KEY:
+            text_defects = check_text_with_gemini(aw_img, aligned, physical_defects)
 
-        # Step 4: Encode outputs
+        # Draw
+        result_img = draw_all_defects(aligned, physical_defects, text_defects)
+
+        # Encode
         result_b64  = cv2_to_b64(result_img)
         diff_b64    = cv2_to_b64(diff_map)
-        aligned_b64 = cv2_to_b64(aligned)
 
-        # Step 5: Gemini summary
-        ai_summary = describe_defects_with_gemini(
-            defects,
-            pil_to_b64(Image.fromarray(cv2.cvtColor(aw_img, cv2.COLOR_BGR2RGB))),
-            result_b64
-        )
+        # Merge all defects for summary
+        all_defects = physical_defects + [dict(d, severity='high') for d in text_defects]
 
-        # Format response (remove contour - not JSON serializable)
-        defects_out = [{k: v for k, v in d.items() if k != 'contour'} for d in defects]
+        # AI summary
+        ai_summary = get_ai_summary(all_defects, aw_img) if all_defects else None
 
-        verdict = 'PASS' if len(defects) == 0 else (
-            'FAIL' if any(d['severity'] == 'high' for d in defects) else 'REVIEW'
-        )
+        # Clean output (remove contour)
+        physical_out = [{k: v for k, v in d.items() if k != 'contour'} for d in physical_defects]
+        text_out     = [dict(d, is_text=True) for d in text_defects]
+
+        verdict = 'PASS'
+        if any(d.get('severity') == 'high' for d in all_defects) or len(text_defects) > 0:
+            verdict = 'FAIL'
+        elif len(all_defects) > 0:
+            verdict = 'REVIEW'
 
         return jsonify({
             'verdict': verdict,
-            'defect_count': len(defects),
-            'defects': defects_out,
+            'defect_count': len(all_defects),
+            'physical_count': len(physical_defects),
+            'text_count': len(text_defects),
+            'defects': physical_out + text_out,
             'result_image': result_b64,
             'diff_image': diff_b64,
-            'aligned_image': aligned_b64,
             'ai_summary': ai_summary,
+            'dpi_used': round(dpi, 1),
         })
 
     except Exception as e:
@@ -388,5 +485,5 @@ def serve(path):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f'QC Inspector running at http://localhost:{port}')
+    print(f'QC Inspector Pro running at http://localhost:{port}')
     app.run(host='0.0.0.0', port=port, debug=False)
