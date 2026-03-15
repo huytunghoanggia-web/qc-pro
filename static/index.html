@@ -208,22 +208,22 @@ input[type=file]{display:none}
       <div class="phdr">
         <div class="dot db"></div>
         <span class="pt">Tờ in thực tế</span>
-        <span class="pn" id="pr-nm">— chưa chọn</span>
-        <button class="pbtn" id="chg-pr" style="display:none" onclick="trigFile('print')">Đổi ảnh</button>
+        <span class="pn" id="print-nm">— chưa chọn</span>
+        <button class="pbtn" id="chg-print" style="display:none" onclick="trigFile('print')">Đổi ảnh</button>
       </div>
-      <div class="carea" id="ca-pr">
-        <div class="uov" id="uov-pr">
+      <div class="carea" id="ca-print">
+        <div class="uov" id="uov-print">
           <svg width="36" height="36" viewBox="0 0 48 48" fill="none"><rect x="8" y="14" width="32" height="26" rx="4" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="7" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="3" fill="white" opacity=".4"/><path d="M18 14L20 10L28 10L30 14" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>
           <p>Tờ in thực tế</p>
           <small>Chụp rõ nét bằng smartphone · kéo thả hoặc chọn file</small>
           <button class="ubtn" onclick="event.stopPropagation();trigFile('print')">Chọn ảnh</button>
         </div>
-        <canvas id="cv-pr"></canvas>
-        <div class="sel-div sel-pr" id="sel-pr"></div>
+        <canvas id="cv-print"></canvas>
+        <div class="sel-div sel-pr" id="sel-print"></div>
       </div>
       <div class="pftr">
-        <span style="opacity:.5;font-size:9px" id="hint-pr">Giữ chuột khoanh vùng cần kiểm tra</span>
-        <span class="sbadge ab" id="sb-pr">
+        <span style="opacity:.5;font-size:9px" id="hint-print">Giữ chuột khoanh vùng cần kiểm tra</span>
+        <span class="sbadge ab" id="sb-print">
           <svg width="9" height="9" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 1.5"/></svg>Đã chọn vùng
           <button class="xbtn" onclick="resetSel('print')">✕</button>
         </span>
@@ -329,34 +329,36 @@ function loadF(e, id){
 }
 
 function loadPrintImage(file){
-  console.log('loadPrintImage:', file.name);
-  const objectUrl = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = function(){
-    console.log('Print loaded:', img.naturalWidth, 'x', img.naturalHeight);
-    S.print.img = img;
-    S.print.imgW = img.naturalWidth;
-    S.print.imgH = img.naturalHeight;
-    // Also store as dataURL for API
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    canvas.getContext('2d').drawImage(img, 0, 0);
-    S.print.dataUrl = canvas.toDataURL('image/jpeg', 0.92);
-    document.getElementById('pr-nm').textContent = file.name;
-    document.getElementById('chg-pr').style.display = '';
-    const uov = document.getElementById('uov-pr');
-    if(uov) uov.style.display = 'none';
-    renderCanvas('print');
-    updateStatus();
-    URL.revokeObjectURL(objectUrl);
+  console.log('loadPrintImage:', file.name, file.size);
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    const dataUrl = ev.target.result;
+    console.log('FileReader done, dataUrl length:', dataUrl.length);
+    const img = new Image();
+    img.onload = function(){
+      console.log('Print img loaded:', img.naturalWidth, 'x', img.naturalHeight);
+      S.print.img = img;
+      S.print.dataUrl = dataUrl;
+      S.print.imgW = img.naturalWidth;
+      S.print.imgH = img.naturalHeight;
+      document.getElementById('print-nm').textContent = file.name;
+      document.getElementById('chg-print').style.display = '';
+      const uov = document.getElementById('uov-pr');
+      if(uov) uov.style.display = 'none';
+      renderCanvas('print');
+      updateStatus();
+    };
+    img.onerror = function(e){
+      console.error('img.onerror:', e);
+      alert('Lỗi hiển thị ảnh. File có thể bị hỏng.');
+    };
+    img.src = dataUrl;
   };
-  img.onerror = function(){
-    console.error('Print image failed to load');
-    alert('Không load được ảnh! Thử ảnh JPG/PNG khác.');
-    URL.revokeObjectURL(objectUrl);
+  reader.onerror = function(e){
+    console.error('FileReader error:', e);
+    alert('Lỗi đọc file: ' + (e.target.error ? e.target.error.message : 'unknown'));
   };
-  img.src = objectUrl;
+  reader.readAsDataURL(file);
 }
 
 // Drag & drop on upload overlays - bound after DOM ready
@@ -439,8 +441,8 @@ async function processFile(id, dataUrl, name, mime){
       S.print.dataUrl = dataUrl;
       S.print.imgW = img.naturalWidth;
       S.print.imgH = img.naturalHeight;
-      document.getElementById('pr-nm').textContent = name;
-      document.getElementById('chg-pr').style.display = '';
+      document.getElementById('print-nm').textContent = name;
+      document.getElementById('chg-print').style.display = '';
       // Hide upload overlay
       const uov = document.getElementById('uov-pr');
       if(uov) uov.style.display = 'none';
@@ -458,35 +460,48 @@ async function processFile(id, dataUrl, name, mime){
 // ── Render canvas ─────────────────────────────────────────────────────────────
 function renderCanvas(id){
   const s = S[id];
-  if(!s.img) return;
+  if(!s.img){ console.warn('renderCanvas: no img for', id); return; }
 
+  // Hide upload overlay
   const uov = document.getElementById('uov-'+id);
   if(uov) uov.style.display = 'none';
 
   const ca = document.getElementById('ca-'+id);
-  const cv = document.getElementById('cv-'+id);
+  if(!ca){ console.warn('renderCanvas: ca not found for', id); return; }
+
+  // Get or create canvas
+  let cv = document.getElementById('cv-'+id);
+  if(!cv){
+    // Create canvas if missing
+    cv = document.createElement('canvas');
+    cv.id = 'cv-'+id;
+    cv.style.position = 'absolute';
+    cv.style.top = '0';
+    cv.style.left = '0';
+    ca.appendChild(cv);
+    console.log('renderCanvas: created new canvas for', id);
+  }
   cv.style.display = 'block';
   s.canvas = cv;
   s.ctx = cv.getContext('2d');
 
-  // Use actual container size
-  const W = ca.offsetWidth || 450;
-  const H = 260; // fixed height from CSS
+  const W = Math.max(ca.offsetWidth, ca.clientWidth, 300);
+  const H = 260;
   const sc = Math.min(W / s.img.naturalWidth, H / s.img.naturalHeight, 1);
-  const cw = Math.round(s.img.naturalWidth * sc);
-  const ch = Math.round(s.img.naturalHeight * sc);
+  const cw = Math.max(1, Math.round(s.img.naturalWidth * sc));
+  const ch = Math.max(1, Math.round(s.img.naturalHeight * sc));
 
   cv.width = cw; cv.height = ch;
-  cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
-  // Center in area
+  cv.style.width = cw + 'px';
+  cv.style.height = ch + 'px';
   cv.style.left = Math.round((W - cw) / 2) + 'px';
   cv.style.top  = Math.round((H - ch) / 2) + 'px';
   s.scale = sc;
 
   s.ctx.clearRect(0, 0, cw, ch);
   s.ctx.drawImage(s.img, 0, 0, cw, ch);
+  console.log('renderCanvas:', id, cw+'x'+ch, 'scale='+sc.toFixed(3));
 
-  // Bind events (use flag to avoid duplicate listeners)
   if(!cv.dataset.bound){
     cv.dataset.bound = '1';
     cv.addEventListener('mousedown',  e => onDown(e, id));
