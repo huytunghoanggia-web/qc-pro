@@ -750,12 +750,16 @@ function renderResults(data, awB64, prB64){
   vb.className = 'vb v'+verdict;
   vb.textContent = verdict==='FAIL'?'✗ LỖI PHÁT HIỆN':verdict==='WARN'?'⚠ CẦN KIỂM TRA':'✓ ĐẠT CHUẨN';
 
+  const alignOk = data.align_method && !data.align_method.includes('fallback');
+  const ssimPct = data.ssim_score ? Math.round(data.ssim_score*100) : '?';
+  const alignColor = alignOk ? 'var(--ok)' : 'var(--warn)';
   document.getElementById('stats').innerHTML=`
     <div class="stat"><div class="snum" style="color:var(--danger)">${defect_count}</div><div class="slbl">Tổng lỗi</div></div>
     <div class="stat"><div class="snum" style="color:var(--danger)">${fail_count}</div><div class="slbl">FAIL</div></div>
     <div class="stat"><div class="snum" style="color:var(--warn)">${warn_count}</div><div class="slbl">WARN</div></div>
-    <div class="stat"><div class="snum" style="color:var(--accent);font-size:11px">${dpi_aw||'?'}</div><div class="slbl">DPI</div></div>
-    <div class="stat"><div class="snum" style="color:var(--muted);font-size:10px">${aw_size||'?'}</div><div class="slbl">Kích thước</div></div>`;
+    <div class="stat"><div class="snum" style="color:${alignColor};font-size:11px">${alignOk?'✓':'⚠'} Align</div><div class="slbl">${(data.align_method||'?').split('_')[0]}</div></div>
+    <div class="stat"><div class="snum" style="color:var(--accent);font-size:13px">${ssimPct}%</div><div class="slbl">SSIM</div></div>
+    <div class="stat"><div class="snum" style="color:var(--muted);font-size:11px">${data.diff_pct||'?'}%</div><div class="slbl">Diff</div></div>`;
 
   const imAW = document.getElementById('im-aw');
   imAW.src = 'data:image/jpeg;base64,'+awB64; imAW.style.display='block';
