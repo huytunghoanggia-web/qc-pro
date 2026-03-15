@@ -216,7 +216,7 @@ input[type=file]{display:none}
           <svg width="36" height="36" viewBox="0 0 48 48" fill="none"><rect x="8" y="14" width="32" height="26" rx="4" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="7" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="3" fill="white" opacity=".4"/><path d="M18 14L20 10L28 10L30 14" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>
           <p>Tờ in thực tế</p>
           <small>Chụp rõ nét bằng smartphone · kéo thả hoặc chọn file</small>
-          <button class="ubtn" onclick="event.stopPropagation();trigFile('print')">Chọn ảnh / Chụp</button>
+          <button class="ubtn" onclick="event.stopPropagation();trigFile('print')">Chọn ảnh</button>
         </div>
         <canvas id="cv-pr"></canvas>
         <div class="sel-div sel-pr" id="sel-pr"></div>
@@ -302,7 +302,10 @@ const awFile = {b64:null, type:null, dpi:null};
 const CAL = {active:false, pts:[], dpi:null};
 
 // ── File loading ───────────────────────────────────────────────────────────────
-function trigFile(id){document.getElementById('file-'+id).click();}
+function trigFile(id){
+  const inp = document.getElementById('file-'+id);
+  if(inp){ inp.value=''; inp.click(); }
+}
 
 function loadF(e, id){
   const file = e.target.files[0];
@@ -315,21 +318,21 @@ function loadF(e, id){
   e.target.value = '';
 }
 
-// Allow drag & drop on canvas areas
-['aw','print'].forEach(id => {
-  document.addEventListener('DOMContentLoaded', () => {
-    const ca = document.getElementById('ca-'+id);
-    ca.addEventListener('dragover', e => { e.preventDefault(); });
-    ca.addEventListener('drop', e => {
-      e.preventDefault();
-      const f = e.dataTransfer.files[0];
-      if(!f) return;
-      const r = new FileReader();
-      r.onload = ev => processFile(id, ev.target.result, f.name, f.type);
-      r.readAsDataURL(f);
-    });
+// Drag & drop on upload overlays - bound after DOM ready
+function bindDrop(id) {
+  const ca = document.getElementById('ca-'+id);
+  if(!ca) return;
+  ca.addEventListener('dragover', e => e.preventDefault());
+  ca.addEventListener('drop', e => {
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    if(!f) return;
+    const r = new FileReader();
+    r.onload = ev => processFile(id, ev.target.result, f.name, f.type);
+    r.onerror = () => alert('Lỗi đọc file!');
+    r.readAsDataURL(f);
   });
-});
+}
 
 async function processFile(id, dataUrl, name, mime){
   const b64 = dataUrl.split(',')[1];
@@ -386,17 +389,28 @@ async function processFile(id, dataUrl, name, mime){
     } catch(err){ console.warn('DPI err', err); }
 
   } else {
-    // Print image
+    // Print image - direct approach
+    console.log('Loading print image:', name, 'size:', dataUrl.length);
     const img = new Image();
     img.onload = () => {
-      S.print.img = img; S.print.dataUrl = dataUrl;
-      S.print.imgW = img.naturalWidth; S.print.imgH = img.naturalHeight;
+      console.log('Print image loaded:', img.naturalWidth, 'x', img.naturalHeight);
+      S.print.img = img;
+      S.print.dataUrl = dataUrl;
+      S.print.imgW = img.naturalWidth;
+      S.print.imgH = img.naturalHeight;
       document.getElementById('pr-nm').textContent = name;
       document.getElementById('chg-pr').style.display = '';
+      // Hide upload overlay
+      const uov = document.getElementById('uov-pr');
+      if(uov) uov.style.display = 'none';
       renderCanvas('print');
       updateStatus();
     };
-    img.onerror = () => alert('Không load được ảnh tờ in! Thử định dạng JPG/PNG khác.');
+    img.onerror = (err) => {
+      console.error('Print image error:', err);
+      alert('Không load được ảnh tờ in!
+Thử: đổi sang JPG, giảm kích thước ảnh, hoặc dùng ảnh khác.');
+    };
     img.src = dataUrl;
   }
 }
@@ -432,20 +446,17 @@ function renderCanvas(id){
   s.ctx.clearRect(0, 0, cw, ch);
   s.ctx.drawImage(s.img, 0, 0, cw, ch);
 
-  // Bind events (remove old first)
-  const newCv = cv.cloneNode(true);
-  cv.parentNode.replaceChild(newCv, cv);
-  S[id].canvas = newCv;
-  S[id].ctx = newCv.getContext('2d');
-  S[id].ctx.drawImage(s.img, 0, 0, cw, ch);
-
-  newCv.addEventListener('mousedown',  e => onDown(e, id));
-  newCv.addEventListener('mousemove',  e => onMove(e, id));
-  newCv.addEventListener('mouseup',    e => onUp(e, id));
-  newCv.addEventListener('mouseleave', e => onUp(e, id));
-  newCv.addEventListener('touchstart', e => {e.preventDefault(); onDown(e.touches[0], id);}, {passive:false});
-  newCv.addEventListener('touchmove',  e => {e.preventDefault(); onMove(e.touches[0], id);}, {passive:false});
-  newCv.addEventListener('touchend',   e => onUp(e.changedTouches[0], id), {passive:false});
+  // Bind events (use flag to avoid duplicate listeners)
+  if(!cv.dataset.bound){
+    cv.dataset.bound = '1';
+    cv.addEventListener('mousedown',  e => onDown(e, id));
+    cv.addEventListener('mousemove',  e => onMove(e, id));
+    cv.addEventListener('mouseup',    e => onUp(e, id));
+    cv.addEventListener('mouseleave', e => onUp(e, id));
+    cv.addEventListener('touchstart', e => {e.preventDefault(); onDown(e.touches[0], id);}, {passive:false});
+    cv.addEventListener('touchmove',  e => {e.preventDefault(); onMove(e.touches[0], id);}, {passive:false});
+    cv.addEventListener('touchend',   e => onUp(e.changedTouches[0], id), {passive:false});
+  }
 }
 
 // ── Get position relative to canvas ──────────────────────────────────────────
@@ -726,7 +737,7 @@ function zm(src){ document.getElementById('zm-img').src=src; document.getElement
 function closeZm(){ document.getElementById('zm-modal').classList.remove('show'); }
 
 window.addEventListener('resize', ()=>{ ['aw','print'].forEach(id=>{ if(S[id].img) renderCanvas(id); }); });
-updateStatus(); updSens();
+updateStatus(); updSens(); bindDrop('aw'); bindDrop('print');
 </script>
 </body>
 </html>
