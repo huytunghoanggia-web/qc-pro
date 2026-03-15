@@ -308,6 +308,7 @@ def _classify(cnt, area_px, bw, bh, aspect, aw_img, pr_img, dpi):
 
 # ── Draw results ──────────────────────────────────────────────────────────────
 def draw_defects(img, defects, text_defects=[]):
+    """Chỉ tô màu vùng lỗi, không ghi chữ."""
     out = img.copy()
     ih, iw = out.shape[:2]
     all_d = [(d, False) for d in defects] + [(d, True) for d in text_defects]
@@ -316,42 +317,51 @@ def draw_defects(img, defects, text_defects=[]):
         x=max(0,d['x']); y=max(0,d['y'])
         w=min(d['w'],iw-x); h=min(d['h'],ih-y)
         if w<=0 or h<=0: continue
+        # Tô màu bán trong suốt
         ov = out.copy()
         cv2.rectangle(ov,(x,y),(x+w,y+h),color,-1)
-        cv2.addWeighted(ov,0.3,out,0.7,0,out)
+        alpha = 0.5 if d.get('verdict')=='FAIL' else 0.35
+        cv2.addWeighted(ov,alpha,out,1-alpha,0,out)
+        # Viền màu
         thick = 3 if d.get('verdict')=='FAIL' else 2
         cv2.rectangle(out,(x,y),(x+w,y+h),color,thick)
-        lbl = f"#{i+1} {d.get('label','?')} {d.get('size_str','')} [{d.get('verdict','')}]"
-        font=cv2.FONT_HERSHEY_SIMPLEX; sc=0.38
-        (tw,th),_ = cv2.getTextSize(lbl,font,sc,1)
-        by = max(y-3, th+3)
-        cv2.rectangle(out,(x,by-th-3),(x+tw+5,by+1),color,-1)
-        cv2.putText(out,lbl,(x+3,by-1),font,sc,(0,0,0),1,cv2.LINE_AA)
     return out
 
 def make_dotmap(print_img, defects, heat, offset_x=0, offset_y=0):
-    """Nền đen tuyền, vị trí lỗi = pixel màu thật từ ảnh chụp."""
-    out = np.zeros_like(print_img)
+    """
+    Nền đen tuyền hoàn toàn.
+    Vị trí lỗi = màu TRẮNG để QC xác định chính xác điểm cần kiểm tra lại.
+    """
     ih, iw = print_img.shape[:2]
+    # Bắt đầu với nền đen tuyền
+    out = np.zeros((ih, iw, 3), dtype=np.uint8)
+
     hh, hw = heat.shape[:2]
+    rh2 = min(hh, ih-offset_y)
+    rw2 = min(hw, iw-offset_x)
 
-    # Paste heat region vào đúng vị trí
-    rh2 = min(hh, ih-offset_y); rw2 = min(hw, iw-offset_x)
     if rh2 > 0 and rw2 > 0:
-        heat_r = cv2.resize(heat[:rh2,:rw2], (rw2, rh2))
-        _, mask = cv2.threshold((heat_r*255).astype(np.uint8), 30, 255, cv2.THRESH_BINARY)
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
+        # Resize heat map về kích thước vùng
+        heat_r = cv2.resize(heat[:rh2,:rw2].astype(np.float32), (rw2, rh2))
+        # Tạo mask nhị phân từ heat
+        heat_u8 = (heat_r * 255).astype(np.uint8)
+        _, mask = cv2.threshold(heat_u8, 25, 255, cv2.THRESH_BINARY)
+        # Dilate để vùng lỗi dễ thấy hơn
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
         mask = cv2.dilate(mask, k)
-        roi_src = print_img[offset_y:offset_y+rh2, offset_x:offset_x+rw2]
-        roi_dst = out[offset_y:offset_y+rh2, offset_x:offset_x+rw2]
-        roi_dst[mask>0] = roi_src[mask>0]
+        # Tô TRẮNG vào vị trí lỗi
+        out[offset_y:offset_y+rh2, offset_x:offset_x+rw2][mask>0] = (255,255,255)
 
-    # Viền trắng quanh mỗi defect
+    # Vẽ thêm hình chữ nhật trắng rõ ràng quanh từng defect bbox
     for d in defects:
         x=max(0,d['x']+offset_x); y=max(0,d['y']+offset_y)
         w=min(d['w'],iw-x); h=min(d['h'],ih-y)
         if w>0 and h>0:
-            cv2.rectangle(out,(x,y),(x+w,y+h),(255,255,255),1)
+            # Fill trắng toàn bộ bbox
+            out[y:y+h, x:x+w] = 255
+            # Viền đậm hơn
+            cv2.rectangle(out,(x,y),(x+w,y+h),(255,255,255),2)
+
     return out
 
 # ── Gemini text check ─────────────────────────────────────────────────────────
