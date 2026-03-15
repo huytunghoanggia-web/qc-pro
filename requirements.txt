@@ -1,5 +1,7 @@
-[build]
-builder = "NIXPACKS"
-
-[deploy]
-startCommand = "gunicorn app:app --workers 2 --timeout 120 --bind 0.0.0.0:$PORT"
+flask==3.0.3
+flask-cors==4.0.1
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+Pillow==10.4.0
+requests==2.32.3
+gunicorn==22.0.0
