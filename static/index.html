@@ -408,8 +408,7 @@ async function processFile(id, dataUrl, name, mime){
     };
     img.onerror = (err) => {
       console.error('Print image error:', err);
-      alert('Không load được ảnh tờ in!
-Thử: đổi sang JPG, giảm kích thước ảnh, hoặc dùng ảnh khác.');
+      alert('Không load được ảnh tờ in! Thử: đổi sang JPG, giảm kích thước ảnh, hoặc dùng ảnh khác.');
     };
     img.src = dataUrl;
   }
