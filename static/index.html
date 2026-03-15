@@ -170,6 +170,16 @@ input[type=file]{display:none}
       </div>
       <span class="sens-hint" id="sens-hint">Cân bằng</span>
     </div>
+    <div class="setting-group">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+        <input type="checkbox" id="check-text" checked style="accent-color:var(--accent)">
+        Kiểm tra văn bản &amp; dấu (AI)
+      </label>
+    </div>
+    <div class="setting-group">
+      <span class="setting-label">DPI ảnh:</span>
+      <input type="number" id="dpi-input" placeholder="Tự động" min="72" max="1200" style="width:90px;font-family:var(--mono);font-size:12px;background:var(--s2);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text)">
+    </div>
     <div class="run-wrap">
       <div class="status-dot" id="status-dot"></div>
       <span class="status-text" id="status-text">Tải ảnh AW và tờ in để bắt đầu</span>
@@ -225,15 +235,42 @@ input[type=file]{display:none}
 const imgs = { aw: null, print: null };
 
 const DEFECT_COLORS = {
-  hickey:      '#ff6400',
-  spot:        '#00c8ff',
-  streak:      '#ff3366',
-  scratch:     '#cc44ff',
-  missing_ink: '#00ff96',
-  mat_net:     '#00e5b3',
-  extra_ink:   '#ff4444',
-  blur:        '#ffd000',
-  anomaly:     '#aaaaaa',
+  hickey:           '#ff6400',
+  dot:              '#00ffff',
+  spot:             '#00c8ff',
+  streak:           '#ff3366',
+  scratch:          '#ff44cc',
+  missing_ink:      '#00ff96',
+  mat_net:          '#00e5b3',
+  extra_ink:        '#ff4444',
+  blur:             '#ffd000',
+  anomaly:          '#aaaaaa',
+  // Text defects
+  wrong_diacritic:  '#ff0066',
+  missing_punct:    '#ff00cc',
+  extra_punct:      '#cc00ff',
+  wrong_char:       '#ff3399',
+  missing_word:     '#ff6600',
+  extra_word:       '#cc6600',
+};
+
+const DEFECT_LABELS = {
+  hickey:           'Hickey',
+  dot:              'Dot / chấm',
+  spot:             'Spot / đốm',
+  streak:           'Vệt / sọc',
+  scratch:          'Xước / vệt dài',
+  missing_ink:      'Thiếu mực',
+  mat_net:          'Mất nét',
+  extra_ink:        'Thừa mực',
+  blur:             'Nhòe / mờ',
+  anomaly:          'Bất thường',
+  wrong_diacritic:  'Sai dấu thanh',
+  missing_punct:    'Thiếu dấu câu',
+  extra_punct:      'Thừa dấu câu',
+  wrong_char:       'Sai ký tự',
+  missing_word:     'Thiếu từ',
+  extra_word:       'Thừa từ',
 };
 
 const DEFECT_LABELS = {
@@ -342,13 +379,18 @@ async function runAnalysis() {
 
   try {
     const sensitivity = parseInt(document.getElementById('sensitivity').value);
+    const checkText   = document.getElementById('check-text').checked;
+    const dpiVal      = document.getElementById('dpi-input').value;
+    const dpi         = dpiVal ? parseInt(dpiVal) : null;
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         awImage:    b64fromDataUrl(imgs.aw),
         printImage: b64fromDataUrl(imgs.print),
-        sensitivity
+        sensitivity,
+        checkText,
+        dpi
       })
     });
 
@@ -388,10 +430,14 @@ function renderResults(data) {
   // Stats
   const highCount = defects.filter(d => d.severity === 'high').length;
   const medCount  = defects.filter(d => d.severity === 'medium').length;
+  const physCount = data.physical_count ?? defect_count;
+  const textCount = data.text_count ?? 0;
+  const dpiUsed   = data.dpi_used ?? '?';
   document.getElementById('result-stats').innerHTML = `
     <div class="stat"><div class="stat-num" style="color:var(--danger)">${defect_count}</div><div class="stat-lbl">Tổng lỗi</div></div>
-    <div class="stat"><div class="stat-num" style="color:var(--danger)">${highCount}</div><div class="stat-lbl">Nghiêm trọng</div></div>
-    <div class="stat"><div class="stat-num" style="color:var(--warn)">${medCount}</div><div class="stat-lbl">Trung bình</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--accent2)">${physCount}</div><div class="stat-lbl">Vật lý</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--danger)">${textCount}</div><div class="stat-lbl">Văn bản</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--muted);font-size:13px">${dpiUsed}</div><div class="stat-lbl">DPI</div></div>
   `;
 
   // Images
@@ -412,15 +458,17 @@ function renderResults(data) {
     document.getElementById('defect-grid').innerHTML = defects.map((d, i) => {
       const color = DEFECT_COLORS[d.type] || '#aaa';
       const sevCls = { high: 'sev-high', medium: 'sev-medium', low: 'sev-low' }[d.severity] || 'sev-low';
-      return `
-        <div class="defect-card">
+      const isText = d.is_text;
+    const badge  = isText ? '<span style="font-size:9px;background:rgba(255,0,102,0.2);color:#ff0066;border-radius:3px;padding:1px 5px;margin-left:4px">VĂN BẢN</span>' : '';
+    const meta   = isText
+      ? `<span style="color:var(--danger)">● Cần sửa</span> &nbsp;·&nbsp; ${d.detail || ''}`
+      : `<span class="${sevCls}">${d.severity === 'high' ? '● Nghiêm trọng' : d.severity === 'medium' ? '◐ Trung bình' : '○ Nhẹ'}</span> &nbsp;·&nbsp; ${d.area_mm2 ? d.area_mm2 + 'mm²' : d.area + 'px²'} &nbsp;·&nbsp; diff: ${d.mean_diff || '—'}`;
+    return `
+        <div class="defect-card" style="${isText ? 'border-color:rgba(255,0,102,0.3)' : ''}">
           <div class="defect-num" style="background:${color}">${i+1}</div>
           <div>
-            <div class="defect-type" style="color:${color}">${d.label}</div>
-            <div class="defect-meta">
-              <span class="${sevCls}">${d.severity === 'high' ? '● Nghiêm trọng' : d.severity === 'medium' ? '◐ Trung bình' : '○ Nhẹ'}</span>
-              &nbsp;·&nbsp; ${d.area}px² &nbsp;·&nbsp; diff: ${d.mean_diff}
-            </div>
+            <div class="defect-type" style="color:${color}">${d.label || (DEFECT_LABELS[d.type] || d.type)}${badge}</div>
+            <div class="defect-meta">${meta}</div>
           </div>
         </div>`;
     }).join('');
