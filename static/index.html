@@ -3,122 +3,95 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>QC Print Inspector Pro</title>
+<title>QC Defect Inspector</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Be+Vietnam+Pro:wght@300;400;500;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0d0f14;--s1:#161920;--s2:#1e2230;
-  --bd:rgba(255,255,255,0.07);--bd2:rgba(255,255,255,0.14);
-  --text:#e8eaf0;--muted:#6b7280;--accent:#00e5b3;--a2:#0099ff;
-  --warn:#ffa733;--danger:#ff4d4d;--ok:#00c896;
-  --mono:'IBM Plex Mono',monospace;--sans:'Be Vietnam Pro',sans-serif}
+:root{--bg:#0d0f14;--s1:#161920;--s2:#1e2230;--bd:rgba(255,255,255,0.07);--bd2:rgba(255,255,255,0.14);--text:#e8eaf0;--muted:#6b7280;--accent:#00e5b3;--a2:#0099ff;--warn:#ffa733;--danger:#ff4d4d;--ok:#00c896;--mono:'IBM Plex Mono',monospace;--sans:'Be Vietnam Pro',sans-serif}
 html,body{height:100%}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+
 header{display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid var(--bd);background:var(--s1);flex-shrink:0}
 .logo{width:28px;height:28px;background:var(--accent);border-radius:6px;display:flex;align-items:center;justify-content:center}
 header h1{font-size:13px;font-weight:600}
 header p{font-size:10px;color:var(--muted)}
 .badge{margin-left:auto;font-family:var(--mono);font-size:10px;background:rgba(0,229,179,0.1);color:var(--accent);border:1px solid rgba(0,229,179,0.2);padding:2px 8px;border-radius:20px}
-.app{display:flex;flex-direction:column;flex:1;padding:12px;gap:10px;max-width:1280px;margin:0 auto;width:100%}
 
-/* Panels */
-.panels{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-@media(max-width:640px){.panels{grid-template-columns:1fr}}
-.panel{background:var(--s1);border:1px solid var(--bd);border-radius:11px;overflow:hidden;display:flex;flex-direction:column}
-.phdr{padding:8px 13px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:7px;flex-shrink:0;min-height:36px}
-.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.dg{background:#f5a623}.db{background:var(--a2)}
-.pt{font-size:10px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
-.pn{font-size:11px;font-weight:600;margin-left:2px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pbtn{font-size:9px;font-family:var(--sans);background:transparent;border:1px solid var(--bd2);border-radius:4px;color:var(--muted);padding:2px 7px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.app{display:flex;flex-direction:column;flex:1;padding:14px;gap:12px;max-width:960px;margin:0 auto;width:100%}
+
+/* Upload */
+.upload-card{background:var(--s1);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+.card-hdr{padding:9px 14px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:8px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--a2)}
+.ct{font-size:10px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.cn{font-size:11px;font-weight:600;margin-left:3px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pbtn{font-size:9px;font-family:var(--sans);background:transparent;border:1px solid var(--bd2);border-radius:4px;color:var(--muted);padding:2px 7px;cursor:pointer}
 .pbtn:hover{border-color:var(--accent);color:var(--accent)}
 
-/* Canvas area - FIXED HEIGHT */
-.carea{position:relative;height:260px;background:var(--bg);overflow:hidden;
-  background-image:linear-gradient(var(--bd) 1px,transparent 1px),linear-gradient(90deg,var(--bd) 1px,transparent 1px);
-  background-size:20px 20px;flex-shrink:0}
+.carea{position:relative;height:280px;background:var(--bg);overflow:hidden;background-image:linear-gradient(var(--bd) 1px,transparent 1px),linear-gradient(90deg,var(--bd) 1px,transparent 1px);background-size:20px 20px}
 .carea canvas{position:absolute;top:0;left:0;display:block}
-
-/* Upload overlay */
-.uov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;cursor:pointer;padding:14px;z-index:2}
+.uov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:pointer;padding:16px;z-index:2}
 .uov:hover{background:rgba(255,255,255,0.02)}
 .uov svg{opacity:.18}
-.uov p{font-size:12px;color:var(--muted)}
+.uov p{font-size:13px;color:var(--muted)}
 .uov small{font-size:10px;color:var(--muted);opacity:.6}
-.ubtn{font-family:var(--sans);font-size:11px;font-weight:500;padding:5px 13px;background:transparent;border:1px solid var(--bd2);border-radius:5px;color:var(--text);cursor:pointer;margin-top:2px;transition:all .2s}
+.ubtn{font-family:var(--sans);font-size:11px;font-weight:500;padding:6px 14px;background:transparent;border:1px solid var(--bd2);border-radius:5px;color:var(--text);cursor:pointer;margin-top:3px;transition:all .2s}
 .ubtn:hover{border-color:var(--accent);color:var(--accent);background:rgba(0,229,179,0.06)}
 
-/* Selection box drawn on canvas */
-.sel-div{position:absolute;pointer-events:none;display:none;z-index:3}
-.sel-aw{border:2px dashed var(--accent);background:rgba(0,229,179,0.07)}
-.sel-pr{border:2px dashed var(--a2);background:rgba(0,153,255,0.07)}
-
-/* Calibration dots */
-.cal-dot{position:absolute;width:10px;height:10px;border-radius:50%;border:2px solid #fff;transform:translate(-50%,-50%);pointer-events:none;z-index:5}
-
-/* Footer */
-.pftr{padding:5px 11px;border-top:1px solid var(--bd);display:flex;align-items:center;gap:6px;font-size:10px;color:var(--muted);font-family:var(--mono);flex-shrink:0;flex-wrap:wrap;min-height:26px}
-.sbadge{display:none;align-items:center;gap:4px;font-size:10px}
-.sbadge.show{display:flex}
-.sbadge.ac{color:var(--accent)}.sbadge.ab{color:var(--a2)}
-.xbtn{font-size:9px;background:none;border:1px solid var(--bd);border-radius:3px;color:var(--muted);padding:1px 5px;cursor:pointer}
-.xbtn:hover{border-color:var(--warn);color:var(--warn)}
-
-/* DPI bar */
-.dbar{padding:5px 11px;border-top:1px solid var(--bd);font-size:10px;font-family:var(--mono);display:none;flex-shrink:0}
-.dbar.ok{color:var(--accent)}.dbar.warn{color:var(--warn)}
-
-/* Calibration panel */
-.calbox{display:none;border-top:1px solid var(--bd2);background:var(--s2);padding:10px 12px;flex-shrink:0}
+/* Cal panel */
+.calbox{display:none;border-top:1px solid var(--bd2);background:var(--s2);padding:10px 14px}
 .calbox.show{display:block}
-.calbox-title{font-size:10px;font-weight:600;color:var(--warn);margin-bottom:8px}
-.cal-steps{display:flex;flex-direction:column;gap:6px}
-.cal-step{font-size:10px;color:var(--muted);display:flex;align-items:center;gap:7px}
-.cal-num{width:16px;height:16px;border-radius:50%;background:var(--warn);color:#000;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.cal-inp-row{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
-.cal-inp-row label{font-size:10px;color:var(--muted)}
-.ci{width:80px;font-family:var(--mono);font-size:11px;background:var(--bg);border:1px solid var(--bd2);border-radius:4px;padding:3px 7px;color:var(--text)}
-.cal-ok{font-size:10px;color:var(--ok);display:none;margin-top:4px}
-.cal-ok.show{display:block}
+.cal-title{font-size:10px;font-weight:600;color:var(--warn);margin-bottom:7px}
+.cal-desc{font-size:10px;color:var(--muted);margin-bottom:7px;line-height:1.5}
+.cal-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cal-row label{font-size:10px;color:var(--muted)}
+.mi{width:72px;font-family:var(--mono);font-size:11px;background:var(--bg);border:1px solid var(--bd2);border-radius:4px;padding:3px 7px;color:var(--text)}
 .calbtn{font-family:var(--sans);font-size:10px;font-weight:500;padding:4px 10px;background:var(--warn);border:none;border-radius:4px;color:#000;cursor:pointer}
+.cal-ok{font-size:10px;color:var(--ok);margin-top:5px;display:none}
+.cal-ok.show{display:block}
+.cal-dot{position:absolute;width:10px;height:10px;border-radius:50%;border:2px solid #fff;transform:translate(-50%,-50%);pointer-events:none;z-index:5}
+.dpi-bar{padding:5px 14px;border-top:1px solid var(--bd);font-size:10px;font-family:var(--mono);display:none;flex-shrink:0}
+.dpi-bar.ok{color:var(--accent)}.dpi-bar.warn{color:var(--warn)}
+
+/* Footer strip */
+.pftr{padding:5px 12px;border-top:1px solid var(--bd);display:flex;align-items:center;gap:7px;font-size:10px;color:var(--muted);font-family:var(--mono);flex-shrink:0;min-height:26px}
 
 /* Settings */
-.settings{display:flex;align-items:center;gap:12px;background:var(--s1);border:1px solid var(--bd);border-radius:9px;padding:9px 13px;flex-wrap:wrap}
+.settings{display:flex;align-items:center;gap:12px;background:var(--s1);border:1px solid var(--bd);border-radius:9px;padding:9px 14px;flex-wrap:wrap}
 .sg{display:flex;align-items:center;gap:7px}
 .sl{font-size:11px;color:var(--muted);white-space:nowrap}
-input[type=range]{width:100px;accent-color:var(--accent)}
-.sv{font-family:var(--mono);font-size:11px;color:var(--accent);min-width:24px}
+input[type=range]{width:110px;accent-color:var(--accent)}
+.sv{font-family:var(--mono);font-size:11px;color:var(--accent);min-width:26px}
 .sh{font-size:10px;color:var(--muted);opacity:.7}
 .run-wrap{display:flex;align-items:center;gap:9px;margin-left:auto}
 .sdot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:all .3s}
 .sdot.ready{background:var(--accent);box-shadow:0 0 5px var(--accent)}
 .stxt{font-size:11px;color:var(--muted)}
-.rbtn{font-family:var(--sans);font-size:12px;font-weight:600;padding:8px 20px;background:var(--accent);border:none;border-radius:6px;color:#000;cursor:pointer;transition:opacity .2s,transform .1s;white-space:nowrap}
+.rbtn{font-family:var(--sans);font-size:12px;font-weight:600;padding:8px 22px;background:var(--accent);border:none;border-radius:6px;color:#000;cursor:pointer;white-space:nowrap;transition:opacity .2s,transform .1s}
 .rbtn:disabled{opacity:.3;cursor:not-allowed}
 .rbtn:not(:disabled):hover{opacity:.88}
 .rbtn:not(:disabled):active{transform:scale(.98)}
 
 /* Results */
-.results{background:var(--s1);border:1px solid var(--bd);border-radius:11px;overflow:hidden;display:none}
+.results{background:var(--s1);border:1px solid var(--bd);border-radius:12px;overflow:hidden;display:none}
 .results.show{display:block}
 .rhdr{padding:12px 16px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.vb{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.05em}
-.vFAIL{background:rgba(255,77,77,.15);color:var(--danger);border:1px solid rgba(255,77,77,.3)}
+.vb{padding:5px 14px;border-radius:20px;font-size:12px;font-weight:700;letter-spacing:.05em}
+.vNG{background:rgba(255,77,77,.15);color:var(--danger);border:1px solid rgba(255,77,77,.3)}
 .vWARN{background:rgba(255,167,51,.15);color:var(--warn);border:1px solid rgba(255,167,51,.3)}
-.vPASS{background:rgba(0,200,150,.15);color:var(--ok);border:1px solid rgba(0,200,150,.3)}
+.vOK{background:rgba(0,200,150,.15);color:var(--ok);border:1px solid rgba(0,200,150,.3)}
 .stats{display:flex;gap:12px;margin-left:auto;flex-wrap:wrap}
 .stat{text-align:center}
-.snum{font-size:16px;font-weight:600;font-family:var(--mono)}
+.snum{font-size:15px;font-weight:600;font-family:var(--mono)}
 .slbl{font-size:9px;color:var(--muted)}
+
+/* Tabs */
 .tabs{display:flex;border-bottom:1px solid var(--bd)}
 .tab{padding:8px 16px;font-size:11px;font-weight:500;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap}
 .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 .tp{display:none}.tp.active{display:block}
-.img-pair{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--bd)}
-@media(max-width:580px){.img-pair{grid-template-columns:1fr}}
 .ibox{background:var(--bg)}
-.ibox img{width:100%;display:block;object-fit:contain;max-height:400px;background:#000;cursor:zoom-in}
-.fimg img{width:100%;display:block;object-fit:contain;max-height:500px;background:#000;cursor:zoom-in}
+.ibox img{width:100%;display:block;object-fit:contain;max-height:480px;background:#000;cursor:zoom-in}
 .ilbl{font-size:9px;color:var(--muted);padding:5px 10px;background:var(--s1);border-bottom:1px solid var(--bd);font-family:var(--mono)}
 .dlist{padding:12px}
 .dlhdr{font-size:9px;color:var(--muted);font-family:var(--mono);letter-spacing:.04em;text-transform:uppercase;margin-bottom:7px}
@@ -127,10 +100,13 @@ input[type=range]{width:100px;accent-color:var(--accent)}
 .dnum{width:20px;height:20px;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#000}
 .dtype{font-size:11px;font-weight:600;margin-bottom:2px}
 .dmeta{font-size:10px;color:var(--muted);font-family:var(--mono);line-height:1.5}
-.tbadge{font-size:8px;background:rgba(255,0,100,.12);color:#ff3388;border:1px solid rgba(255,0,100,.2);border-radius:2px;padding:1px 3px;margin-left:3px}
+.pipeline-log{padding:10px 14px;background:var(--s2);margin:10px 14px;border-radius:7px;border:1px solid var(--bd)}
+.pipeline-log p{font-size:10px;font-family:var(--mono);color:var(--muted);line-height:1.8}
 .aisec{padding:12px;border-top:1px solid var(--bd)}
 .aihdr{display:flex;align-items:center;gap:5px;font-size:9px;font-weight:600;color:var(--accent);margin-bottom:6px;letter-spacing:.04em;text-transform:uppercase}
 .aitxt{font-size:12px;line-height:1.7;white-space:pre-wrap}
+
+/* Loader */
 .loader{position:fixed;inset:0;background:rgba(13,15,20,.9);backdrop-filter:blur(4px);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:200;gap:12px}
 .loader.show{display:flex}
 .spin{width:40px;height:40px;border:3px solid var(--bd2);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
@@ -139,6 +115,7 @@ input[type=range]{width:100px;accent-color:var(--accent)}
 .lstep{font-size:10px;color:var(--muted);font-family:var(--mono)}
 .lprog{width:200px;height:3px;background:var(--s2);border-radius:2px;overflow:hidden}
 .lbar{height:100%;background:var(--accent);border-radius:2px;transition:width .4s ease;width:0}
+
 .zoom{position:fixed;inset:0;background:rgba(0,0,0,.95);display:none;align-items:center;justify-content:center;z-index:300;cursor:zoom-out;padding:10px}
 .zoom.show{display:flex}
 .zoom img{max-width:100%;max-height:100%;object-fit:contain}
@@ -148,86 +125,44 @@ input[type=file]{display:none}
 <body>
 <header>
   <div class="logo"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" fill="#000"/><rect x="11" y="2" width="7" height="7" rx="1.5" fill="#000" opacity=".5"/><rect x="2" y="11" width="7" height="7" rx="1.5" fill="#000" opacity=".5"/><rect x="11" y="11" width="7" height="7" rx="1.5" fill="#000"/></svg></div>
-  <div><h1>QC Print Inspector Pro</h1><p>Pixel diff · SSIM · Edge · Gradient · AI — khoanh vùng 2 phía · calibration 2 điểm</p></div>
-  <span class="badge">Pro v2.1</span>
+  <div><h1>QC Defect Inspector</h1><p>Spot · Dot · Hickey · Blur · Smear · Scratch · Noise — không cần AW</p></div>
+  <span class="badge">v3.0</span>
 </header>
 
 <div class="app">
-  <div class="panels">
 
-    <!-- ── AW Panel ── -->
-    <div class="panel">
-      <div class="phdr">
-        <div class="dot dg"></div>
-        <span class="pt">Artwork gốc</span>
-        <span class="pn" id="aw-nm">— chưa chọn</span>
-        <button class="pbtn" id="chg-aw" style="display:none" onclick="trigFile('aw')">Đổi file</button>
-      </div>
-      <div class="carea" id="ca-aw">
-        <div class="uov" id="uov-aw">
-          <svg width="36" height="36" viewBox="0 0 48 48" fill="none"><rect x="6" y="8" width="36" height="32" rx="4" stroke="white" stroke-width="2"/><path d="M6 28L15 20L22 26L30 18L42 28" stroke="white" stroke-width="2" stroke-linejoin="round"/><circle cx="32" cy="16" r="4" stroke="white" stroke-width="2"/></svg>
-          <p>Artwork gốc (AW)</p>
-          <small>PDF, PNG, JPG — tỉ lệ 1:1 thật</small>
-          <button class="ubtn" onclick="event.stopPropagation();trigFile('aw')">Chọn file AW</button>
-        </div>
-        <canvas id="cv-aw"></canvas>
-        <div class="sel-div sel-aw" id="sel-aw"></div>
-      </div>
-      <div class="pftr">
-        <span style="opacity:.5;font-size:9px" id="hint-aw">Giữ chuột khoanh vùng mẫu</span>
-        <span class="sbadge ac" id="sb-aw">
-          <svg width="9" height="9" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 1.5"/></svg>Đã chọn vùng
-          <button class="xbtn" onclick="resetSel('aw')">✕</button>
-        </span>
-        <span class="sbadge" id="cb-aw" style="color:var(--warn)">
-          📍 <span id="cb-aw-txt">0/2 điểm</span>
-          <button class="xbtn" onclick="resetCal()">✕</button>
-        </span>
-      </div>
-      <div class="dbar" id="dbar"></div>
-      <div class="calbox" id="calbox">
-        <div class="calbox-title">⚙ Calibration — xác định tỉ lệ mm/pixel</div>
-        <div class="cal-steps">
-          <div class="cal-step"><div class="cal-num">1</div>Nhấn nút bên dưới rồi click 2 điểm bất kỳ trên AW (hoặc tờ in) mà bạn biết khoảng cách thật</div>
-          <div class="cal-step"><div class="cal-num">2</div>Nhập khoảng cách thật giữa 2 điểm đó (mm)</div>
-          <div class="cal-step"><div class="cal-num">3</div>App tự tính DPI và kích thước lỗi chính xác</div>
-        </div>
-        <div class="cal-inp-row">
-          <button class="calbtn" id="cal-pick-btn" onclick="startCalibration()">📍 Chọn 2 điểm trên AW</button>
-          <label>Khoảng cách thật:</label>
-          <input class="ci" type="number" id="cal-mm" placeholder="mm" min="0.1" step="0.1">
-          <label>mm</label>
-          <button class="calbtn" onclick="applyCalibration()">Áp dụng</button>
-        </div>
-        <div class="cal-ok" id="cal-ok"></div>
-      </div>
+  <!-- Upload -->
+  <div class="upload-card">
+    <div class="card-hdr">
+      <div class="dot"></div>
+      <span class="ct">Tờ in thực tế</span>
+      <span class="cn" id="pr-nm">— chưa chọn ảnh</span>
+      <button class="pbtn" id="chg-pr" style="display:none" onclick="trigFile()">Đổi ảnh</button>
     </div>
-
-    <!-- ── Print Panel ── -->
-    <div class="panel">
-      <div class="phdr">
-        <div class="dot db"></div>
-        <span class="pt">Tờ in thực tế</span>
-        <span class="pn" id="print-nm">— chưa chọn</span>
-        <button class="pbtn" id="chg-print" style="display:none" onclick="trigFile('print')">Đổi ảnh</button>
+    <div class="carea" id="ca-pr">
+      <div class="uov" id="uov-pr" onclick="trigFile()">
+        <svg width="40" height="40" viewBox="0 0 48 48" fill="none"><rect x="8" y="14" width="32" height="26" rx="4" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="7" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="3" fill="white" opacity=".4"/><path d="M18 14L20 10L28 10L30 14" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>
+        <p>Ảnh tờ in thực tế</p>
+        <small>Chụp bằng smartphone — không cần AW · PNG/JPG</small>
+        <button class="ubtn" onclick="event.stopPropagation();trigFile()">Chọn ảnh / Chụp</button>
       </div>
-      <div class="carea" id="ca-print">
-        <div class="uov" id="uov-print">
-          <svg width="36" height="36" viewBox="0 0 48 48" fill="none"><rect x="8" y="14" width="32" height="26" rx="4" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="7" stroke="white" stroke-width="2"/><circle cx="24" cy="26" r="3" fill="white" opacity=".4"/><path d="M18 14L20 10L28 10L30 14" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>
-          <p>Tờ in thực tế</p>
-          <small>Chụp rõ nét bằng smartphone · kéo thả hoặc chọn file</small>
-          <button class="ubtn" onclick="event.stopPropagation();trigFile('print')">Chọn ảnh</button>
-        </div>
-        <canvas id="cv-print"></canvas>
-        <div class="sel-div sel-pr" id="sel-print"></div>
+      <canvas id="cv-pr"></canvas>
+    </div>
+    <div class="pftr">
+      <span style="opacity:.5;font-size:9px">Upload ảnh tờ in — app tự phát hiện lỗi</span>
+    </div>
+    <div class="dpi-bar" id="dpi-bar"></div>
+    <div class="calbox" id="calbox">
+      <div class="cal-title">⚙ Calibration — xác định kích thước thật (tùy chọn)</div>
+      <div class="cal-desc">Để app hiển thị kích thước lỗi bằng mm, nhấn chọn 2 điểm trên ảnh rồi nhập khoảng cách thật.</div>
+      <div class="cal-row">
+        <button class="calbtn" id="cal-btn" onclick="startCal()">📍 Chọn 2 điểm</button>
+        <label>Khoảng cách:</label>
+        <input class="mi" type="number" id="cal-mm" placeholder="mm" min="0.1" step="0.1">
+        <label>mm</label>
+        <button class="calbtn" onclick="applyCal()">Áp dụng</button>
       </div>
-      <div class="pftr">
-        <span style="opacity:.5;font-size:9px" id="hint-print">Giữ chuột khoanh vùng cần kiểm tra</span>
-        <span class="sbadge ab" id="sb-print">
-          <svg width="9" height="9" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 1.5"/></svg>Đã chọn vùng
-          <button class="xbtn" onclick="resetSel('print')">✕</button>
-        </span>
-      </div>
+      <div class="cal-ok" id="cal-ok"></div>
     </div>
   </div>
 
@@ -235,19 +170,19 @@ input[type=file]{display:none}
   <div class="settings">
     <div class="sg">
       <span class="sl">Độ nhạy:</span>
-      <input type="range" id="sens" min="10" max="70" value="28" step="2" oninput="updSens()">
-      <span class="sv" id="sv">28</span>
+      <input type="range" id="sens" min="10" max="70" value="30" step="2" oninput="updSens()">
+      <span class="sv" id="sv">30</span>
       <span class="sh" id="sh">Cân bằng</span>
     </div>
     <div class="sg">
       <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer">
-        <input type="checkbox" id="chk-txt" checked style="accent-color:var(--accent)">
-        Kiểm tra dấu/văn bản (AI)
+        <input type="checkbox" id="chk-ai" checked style="accent-color:var(--accent)">
+        Nhận xét AI
       </label>
     </div>
     <div class="run-wrap">
       <div class="sdot" id="sdot"></div>
-      <span class="stxt" id="stxt">Tải ảnh và khoanh vùng để bắt đầu</span>
+      <span class="stxt" id="stxt">Tải ảnh tờ in để bắt đầu</span>
       <button class="rbtn" id="rbtn" disabled onclick="runAnalysis()">Phân tích →</button>
     </div>
   </div>
@@ -264,19 +199,19 @@ input[type=file]{display:none}
       <div class="tab" onclick="stab('list')">📋 Danh sách</div>
     </div>
     <div class="tp active" id="tp-color">
-      <div class="img-pair">
-        <div class="ibox"><div class="ilbl">▪ Vùng AW gốc</div><img id="im-aw" src="" onclick="zm(this.src)" style="display:none"></div>
-        <div class="ibox"><div class="ilbl">▪ Vùng tờ in — lỗi tô màu (nhấn phóng to)</div><img id="im-color" src="" onclick="zm(this.src)"></div>
-      </div>
+      <div class="ibox"><div class="ilbl">▪ Ảnh tờ in — lỗi được tô màu (nhấn phóng to)</div><img id="im-color" src="" onclick="zm(this.src)"></div>
     </div>
     <div class="tp" id="tp-dot">
-      <div class="ilbl" style="padding:7px 12px">▪ Bản đồ điểm lỗi — nền đen tuyền · vị trí lỗi hiện màu thật từ ảnh chụp</div>
-      <div class="fimg"><img id="im-dot" src="" onclick="zm(this.src)"></div>
+      <div class="ilbl" style="padding:6px 12px">▪ Bản đồ điểm lỗi — nền đen · vùng trắng = vị trí cần kiểm tra lại</div>
+      <div class="ibox"><img id="im-dot" src="" onclick="zm(this.src)"></div>
     </div>
     <div class="tp" id="tp-list">
       <div class="dlist">
         <div class="dlhdr" id="dlhdr">—</div>
         <div class="dgrid" id="dgrid"></div>
+      </div>
+      <div class="pipeline-log" id="pipelog" style="display:none">
+        <p id="pipelog-txt"></p>
       </div>
       <div class="aisec" id="aisec" style="display:none">
         <div class="aihdr"><svg width="10" height="10" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M6 4v4M4 6h4" stroke="currentColor" stroke-width="1.5"/></svg>Nhận xét AI</div>
@@ -286,522 +221,261 @@ input[type=file]{display:none}
   </div>
 </div>
 
-<input type="file" id="file-aw"    accept="image/*,application/pdf" onchange="loadF(event,'aw')">
-<input type="file" id="file-print" accept="image/*" onchange="loadF(event,'print')">
+<input type="file" id="file-pr" accept="image/*" onchange="loadF(event)">
 <div class="loader" id="loader"><div class="spin"></div><div class="ltit" id="ltit">Đang phân tích...</div><div class="lstep" id="lstep"></div><div class="lprog"><div class="lbar" id="lbar"></div></div></div>
 <div class="zoom" id="zm-modal" onclick="closeZm()"><img id="zm-img" src=""></div>
 
 <script>
-// ── State ─────────────────────────────────────────────────────────────────────
-const S = {
-  aw:    {img:null, dataUrl:null, canvas:null, ctx:null, rect:null, drawing:false, start:null, imgW:0, imgH:0, scale:1},
-  print: {img:null, dataUrl:null, canvas:null, ctx:null, rect:null, drawing:false, start:null, imgW:0, imgH:0, scale:1},
-};
-const awFile = {b64:null, type:null, dpi:null};
-// Calibration state
-const CAL = {active:false, pts:[], dpi:null};
+let printImg = null;
+let printDataUrl = null;
+let calDpi = null;
+const CAL = {active:false, pts:[], pxDist:null};
 
-// ── File loading ───────────────────────────────────────────────────────────────
-function trigFile(id){
-  const inp = document.getElementById('file-'+id);
-  if(!inp) return;
-  inp.value = '';
-  inp.click();
-}
-
-function loadF(e, id){
-  const file = e.target.files[0];
-  if(!file){ console.log('No file selected'); return; }
-  console.log('loadF:', id, file.name, file.type, file.size);
-
-  if(id === 'print'){
-    // Simple direct approach for print image
-    loadPrintImage(file);
-    return;
-  }
-
-  // AW file - use FileReader for base64 (needed for API)
-  const reader = new FileReader();
-  reader.onload = ev => processFile(id, ev.target.result, file.name, file.type);
-  reader.onerror = () => alert('Lỗi đọc file AW!');
-  reader.readAsDataURL(file);
-  e.target.value = '';
-}
-
-function loadPrintImage(file){
-  console.log('loadPrintImage:', file.name, file.size);
-  const reader = new FileReader();
-  reader.onload = function(ev){
-    const dataUrl = ev.target.result;
-    console.log('FileReader done, dataUrl length:', dataUrl.length);
-    const img = new Image();
-    img.onload = function(){
-      console.log('Print img loaded:', img.naturalWidth, 'x', img.naturalHeight);
-      S.print.img = img;
-      S.print.dataUrl = dataUrl;
-      S.print.imgW = img.naturalWidth;
-      S.print.imgH = img.naturalHeight;
-      document.getElementById('print-nm').textContent = file.name;
-      document.getElementById('chg-print').style.display = '';
-      const uov = document.getElementById('uov-pr');
-      if(uov) uov.style.display = 'none';
-      renderCanvas('print');
-      updateStatus();
-    };
-    img.onerror = function(e){
-      console.error('img.onerror:', e);
-      alert('Lỗi hiển thị ảnh. File có thể bị hỏng.');
-    };
-    img.src = dataUrl;
-  };
-  reader.onerror = function(e){
-    console.error('FileReader error:', e);
-    alert('Lỗi đọc file: ' + (e.target.error ? e.target.error.message : 'unknown'));
-  };
-  reader.readAsDataURL(file);
-}
-
-// Drag & drop on upload overlays - bound after DOM ready
-function bindDrop(id) {
-  const ca = document.getElementById('ca-'+id);
-  if(!ca) return;
-  ca.addEventListener('dragover', e => e.preventDefault());
-  ca.addEventListener('drop', e => {
-    e.preventDefault();
-    const f = e.dataTransfer.files[0];
-    if(!f) return;
-    const r = new FileReader();
-    r.onload = ev => processFile(id, ev.target.result, f.name, f.type);
-    r.onerror = () => alert('Lỗi đọc file!');
-    r.readAsDataURL(f);
-  });
-}
-
-async function processFile(id, dataUrl, name, mime){
-  const b64 = dataUrl.split(',')[1];
-  const isPdf = mime === 'application/pdf';
-
-  if(id === 'aw'){
-    awFile.b64 = b64; awFile.type = isPdf ? 'pdf' : 'image'; awFile.dpi = null;
-    document.getElementById('aw-nm').textContent = name;
-    document.getElementById('chg-aw').style.display = '';
-
-    if(!isPdf){
-      const img = new Image();
-      img.onload = () => {
-        S.aw.img = img; S.aw.dataUrl = dataUrl;
-        S.aw.imgW = img.naturalWidth; S.aw.imgH = img.naturalHeight;
-        renderCanvas('aw');
-        updateStatus();
-      };
-      img.onerror = () => alert('Không load được ảnh AW!');
-      img.src = dataUrl;
-    } else {
-      // PDF placeholder
-      S.aw.dataUrl = dataUrl;
-      document.getElementById('uov-aw').style.display = 'none';
-      document.getElementById('ca-aw').innerHTML = `
-        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:var(--s2)">
-          <div style="font-size:28px">📄</div>
-          <div style="font-size:11px;font-weight:600;color:var(--text)">${name}</div>
-          <div style="font-size:9px;color:var(--muted)">PDF đã tải — khoanh vùng không khả dụng với PDF</div>
-        </div>`;
-      updateStatus();
-    }
-
-    // Get DPI async
-    try{
-      const res = await fetch('/api/get_aw_info',{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({fileData:b64, fileType:awFile.type})
-      });
-      const info = await res.json();
-      const bar = document.getElementById('dbar');
-      const calbox = document.getElementById('calbox');
-      bar.style.display = '';
-      if(info.dpi && info.dpi > 10){
-        awFile.dpi = info.dpi; CAL.dpi = info.dpi;
-        bar.className = 'dbar ok';
-        bar.textContent = `✓ ${info.source}`;
-        calbox.classList.remove('show');
-      } else {
-        bar.className = 'dbar warn';
-        bar.textContent = '⚠ Không đọc được DPI — dùng calibration 2 điểm bên dưới';
-        calbox.classList.add('show');
-      }
-    } catch(err){ console.warn('DPI err', err); }
-
-  } else {
-    // Print image - direct approach
-    console.log('Loading print image:', name, 'size:', dataUrl.length);
-    const img = new Image();
-    img.onload = () => {
-      console.log('Print image loaded:', img.naturalWidth, 'x', img.naturalHeight);
-      S.print.img = img;
-      S.print.dataUrl = dataUrl;
-      S.print.imgW = img.naturalWidth;
-      S.print.imgH = img.naturalHeight;
-      document.getElementById('print-nm').textContent = name;
-      document.getElementById('chg-print').style.display = '';
-      // Hide upload overlay
-      const uov = document.getElementById('uov-pr');
-      if(uov) uov.style.display = 'none';
-      renderCanvas('print');
-      updateStatus();
-    };
-    img.onerror = (err) => {
-      console.error('Print image error:', err);
-      alert('Không load được ảnh tờ in! Thử: đổi sang JPG, giảm kích thước ảnh, hoặc dùng ảnh khác.');
-    };
-    img.src = dataUrl;
-  }
-}
-
-// ── Render canvas ─────────────────────────────────────────────────────────────
-function renderCanvas(id){
-  const s = S[id];
-  if(!s.img){ console.warn('renderCanvas: no img for', id); return; }
-
-  // Hide upload overlay
-  const uov = document.getElementById('uov-'+id);
-  if(uov) uov.style.display = 'none';
-
-  const ca = document.getElementById('ca-'+id);
-  if(!ca){ console.warn('renderCanvas: ca not found for', id); return; }
-
-  // Get or create canvas
-  let cv = document.getElementById('cv-'+id);
-  if(!cv){
-    // Create canvas if missing
-    cv = document.createElement('canvas');
-    cv.id = 'cv-'+id;
-    cv.style.position = 'absolute';
-    cv.style.top = '0';
-    cv.style.left = '0';
-    ca.appendChild(cv);
-    console.log('renderCanvas: created new canvas for', id);
-  }
-  cv.style.display = 'block';
-  s.canvas = cv;
-  s.ctx = cv.getContext('2d');
-
-  const W = Math.max(ca.offsetWidth, ca.clientWidth, 300);
-  const H = 260;
-  const sc = Math.min(W / s.img.naturalWidth, H / s.img.naturalHeight, 1);
-  const cw = Math.max(1, Math.round(s.img.naturalWidth * sc));
-  const ch = Math.max(1, Math.round(s.img.naturalHeight * sc));
-
-  cv.width = cw; cv.height = ch;
-  cv.style.width = cw + 'px';
-  cv.style.height = ch + 'px';
-  cv.style.left = Math.round((W - cw) / 2) + 'px';
-  cv.style.top  = Math.round((H - ch) / 2) + 'px';
-  s.scale = sc;
-
-  s.ctx.clearRect(0, 0, cw, ch);
-  s.ctx.drawImage(s.img, 0, 0, cw, ch);
-  console.log('renderCanvas:', id, cw+'x'+ch, 'scale='+sc.toFixed(3));
-
-  if(!cv.dataset.bound){
-    cv.dataset.bound = '1';
-    cv.addEventListener('mousedown',  e => onDown(e, id));
-    cv.addEventListener('mousemove',  e => onMove(e, id));
-    cv.addEventListener('mouseup',    e => onUp(e, id));
-    cv.addEventListener('mouseleave', e => onUp(e, id));
-    cv.addEventListener('touchstart', e => {e.preventDefault(); onDown(e.touches[0], id);}, {passive:false});
-    cv.addEventListener('touchmove',  e => {e.preventDefault(); onMove(e.touches[0], id);}, {passive:false});
-    cv.addEventListener('touchend',   e => onUp(e.changedTouches[0], id), {passive:false});
-  }
-}
-
-// ── Get position relative to canvas ──────────────────────────────────────────
-function getPos(e, id){
-  const cv = S[id].canvas;
-  const r = cv.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top };
-}
-
-// ── Mouse/touch handlers ──────────────────────────────────────────────────────
-function onDown(e, id){
-  if(CAL.active && id === 'aw'){
-    handleCalClick(e, id); return;
-  }
-  const s = S[id]; if(!s.canvas) return;
-  s.drawing = true; s.start = getPos(e, id); s.rect = null;
-  const sel = document.getElementById('sel-'+id);
-  sel.style.display = 'none';
-  document.getElementById('sb-'+id).classList.remove('show');
-  updateStatus();
-}
-
-function onMove(e, id){
-  const s = S[id]; if(!s.drawing) return;
-  const pos = getPos(e, id);
-  const x = Math.min(s.start.x, pos.x), y = Math.min(s.start.y, pos.y);
-  const w = Math.abs(pos.x - s.start.x), h = Math.abs(pos.y - s.start.y);
-  const sel = document.getElementById('sel-'+id);
-  const ca = document.getElementById('ca-'+id);
-  const wr = ca.getBoundingClientRect();
-  const cr = s.canvas.getBoundingClientRect();
-  sel.style.cssText = `display:block;left:${x+cr.left-wr.left}px;top:${y+cr.top-wr.top}px;width:${w}px;height:${h}px`;
-}
-
-function onUp(e, id){
-  const s = S[id]; if(!s.drawing) return;
-  s.drawing = false;
-  if(!e) return;
-  const pos = getPos(e, id);
-  const x = Math.min(s.start.x, pos.x), y = Math.min(s.start.y, pos.y);
-  const w = Math.abs(pos.x - s.start.x), h = Math.abs(pos.y - s.start.y);
-  if(w < 6 || h < 6){ document.getElementById('sel-'+id).style.display='none'; return; }
-  s.rect = {x, y, w, h};
-  document.getElementById('sb-'+id).classList.add('show');
-  updateStatus();
-}
-
-function resetSel(id){
-  S[id].rect = null;
-  document.getElementById('sel-'+id).style.display = 'none';
-  document.getElementById('sb-'+id).classList.remove('show');
-  updateStatus();
-}
-
-// ── Calibration 2-point ───────────────────────────────────────────────────────
-function startCalibration(){
-  CAL.active = true; CAL.pts = [];
-  document.getElementById('cal-pick-btn').textContent = '📍 Click điểm 1 trên AW...';
-  document.getElementById('cal-pick-btn').style.background = 'var(--accent)';
-  document.getElementById('cb-aw').classList.add('show');
-  document.getElementById('cb-aw-txt').textContent = '0/2 điểm';
-  document.getElementById('cal-ok').classList.remove('show');
-  // Remove old cal dots
-  document.querySelectorAll('.cal-dot').forEach(d => d.remove());
-}
-
-function handleCalClick(e, id){
-  if(!CAL.active || id !== 'aw') return;
-  const pos = getPos(e, id);
-  CAL.pts.push({x: pos.x, y: pos.y});
-
-  // Draw dot
-  const ca = document.getElementById('ca-'+id);
-  const wr = ca.getBoundingClientRect();
-  const cr = S[id].canvas.getBoundingClientRect();
-  const dot = document.createElement('div');
-  dot.className = 'cal-dot';
-  dot.style.cssText = `left:${pos.x+cr.left-wr.left}px;top:${pos.y+cr.top-wr.top}px;background:${CAL.pts.length===1?'var(--warn)':'var(--accent)'}`;
-  ca.appendChild(dot);
-
-  document.getElementById('cb-aw-txt').textContent = `${CAL.pts.length}/2 điểm`;
-
-  if(CAL.pts.length === 1){
-    document.getElementById('cal-pick-btn').textContent = '📍 Click điểm 2 trên AW...';
-  } else if(CAL.pts.length >= 2){
-    CAL.active = false;
-    document.getElementById('cal-pick-btn').textContent = '✓ Đã chọn 2 điểm';
-    document.getElementById('cal-pick-btn').style.background = 'var(--ok)';
-    // Calculate pixel distance
-    const dx = CAL.pts[1].x - CAL.pts[0].x;
-    const dy = CAL.pts[1].y - CAL.pts[0].y;
-    const pxDist = Math.sqrt(dx*dx + dy*dy);
-    CAL._pxDist = pxDist;
-    document.getElementById('cal-ok').classList.remove('show');
-    document.getElementById('cal-ok').textContent = `Khoảng cách: ${Math.round(pxDist)}px — nhập mm thật và nhấn Áp dụng`;
-    document.getElementById('cal-ok').classList.add('show');
-  }
-}
-
-function applyCalibration(){
-  if(CAL.pts.length < 2){ alert('Cần chọn 2 điểm trước!'); return; }
-  const mm = parseFloat(document.getElementById('cal-mm').value);
-  if(!mm || mm <= 0){ alert('Nhập khoảng cách mm hợp lệ!'); return; }
-  const dpi = (CAL._pxDist / mm) * 25.4 / S.aw.scale;
-  CAL.dpi = dpi; awFile.dpi = dpi;
-  const el = document.getElementById('cal-ok');
-  el.textContent = `✓ DPI = ${Math.round(dpi)} — 1px = ${(mm/CAL._pxDist).toFixed(4)}mm`;
-  el.classList.add('show');
-  const bar = document.getElementById('dbar');
-  bar.className = 'dbar ok';
-  bar.textContent = `✓ Calibration: ${Math.round(dpi)} DPI (từ ${mm}mm / ${Math.round(CAL._pxDist)}px)`;
-  document.getElementById('cb-aw').classList.remove('show');
-}
-
-function resetCal(){
-  CAL.active=false; CAL.pts=[]; CAL.dpi=null; CAL._pxDist=null;
-  document.querySelectorAll('.cal-dot').forEach(d=>d.remove());
-  document.getElementById('cb-aw').classList.remove('show');
-  document.getElementById('cal-pick-btn').textContent='📍 Chọn 2 điểm trên AW';
-  document.getElementById('cal-pick-btn').style.background='var(--warn)';
-  document.getElementById('cal-ok').classList.remove('show');
-}
-
-// ── Status ────────────────────────────────────────────────────────────────────
-function updateStatus(){
-  const hA = !!(S.aw.img || S.aw.dataUrl);
-  const hP = !!S.print.img;
-  const hAS = !!S.aw.rect;
-  const hPS = !!S.print.rect;
-  const btn = document.getElementById('rbtn');
-  const dot = document.getElementById('sdot');
-  const txt = document.getElementById('stxt');
-  const steps = [
-    [!hA,  'Tải file Artwork gốc (PDF/PNG/JPG)'],
-    [!hAS, 'Khoanh vùng mẫu trên AW'],
-    [!hP,  'Tải ảnh tờ in thực tế'],
-    [!hPS, 'Khoanh vùng cần kiểm tra trên tờ in'],
-  ];
-  for(const [c,m] of steps){
-    if(c){ txt.textContent=m; dot.className='sdot'; btn.disabled=true; return; }
-  }
-  txt.textContent = 'Sẵn sàng phân tích!';
-  dot.className = 'sdot ready'; btn.disabled = false;
-}
-
-// ── Crop to base64 ────────────────────────────────────────────────────────────
-function cropB64(id){
-  const s = S[id];
-  if(!s.canvas || !s.rect) return null;
-  const {x,y,w,h} = s.rect;
-  const cw = Math.max(1, Math.round(w));
-  const ch = Math.max(1, Math.round(h));
-  const tmp = document.createElement('canvas');
-  tmp.width = cw; tmp.height = ch;
-  const ctx = tmp.getContext('2d');
-  // Draw from canvas (scaled) - works for both aw and print
-  ctx.drawImage(s.canvas, x, y, w, h, 0, 0, cw, ch);
-  const b64 = tmp.toDataURL('image/jpeg', 0.95).split(',')[1];
-  console.log('cropB64', id, cw+'x'+ch, b64.length, 'chars');
-  return b64;
-}
-
-// ── Progress ──────────────────────────────────────────────────────────────────
 const PSTEPS=[
-  [8,'Đọc DPI & kích thước AW...'],[18,'Align & scale ảnh...'],
-  [30,'LAB pixel diff...'],[44,'SSIM structural similarity...'],
-  [56,'Edge compare (Canny)...'],[68,'Gradient & local contrast...'],
-  [80,'Phân loại & tính kích thước mm...'],[90,'Kiểm tra dấu/văn bản (AI)...'],
-  [97,'Tạo bản đồ lỗi...'],
+  [10,'Resize ảnh...'],
+  [25,'Normalize brightness...'],
+  [35,'Denoise...'],
+  [48,'Detect blur / smudge...'],
+  [60,'Detect spot / dot / hickey...'],
+  [72,'Detect scratch / line...'],
+  [82,'Detect smear / stain...'],
+  [90,'Detect noise / texture...'],
+  [97,'Render kết quả...'],
 ];
 let _st=null,_si=0;
-function startProg(){_si=0;_tick();_st=setInterval(_tick,2300);}
+function startProg(){_si=0;_tick();_st=setInterval(_tick,1800);}
 function _tick(){if(_si>=PSTEPS.length)return;document.getElementById('lbar').style.width=PSTEPS[_si][0]+'%';document.getElementById('lstep').textContent=PSTEPS[_si][1];_si=Math.min(_si+1,PSTEPS.length-1);}
 function stopProg(){clearInterval(_st);document.getElementById('lbar').style.width='100%';}
 
-// ── Run analysis ──────────────────────────────────────────────────────────────
-async function runAnalysis(){
-  const awCrop = cropB64('aw');
-  const prCrop = cropB64('print');
-  if(!awCrop){ alert('Cần khoanh vùng trên AW!'); return; }
-  if(!prCrop){ alert('Cần khoanh vùng trên tờ in!'); return; }
+function trigFile(){
+  const inp=document.getElementById('file-pr');
+  inp.value=''; inp.click();
+}
 
-  const loader = document.getElementById('loader');
-  loader.classList.add('show');
-  startProg();
+function loadF(e){
+  const file=e.target.files[0]; if(!file)return;
+  console.log('Loading print:',file.name,file.size);
+  const reader=new FileReader();
+  reader.onload=ev=>{
+    const dataUrl=ev.target.result;
+    const img=new Image();
+    img.onload=()=>{
+      console.log('Loaded:',img.naturalWidth,'x',img.naturalHeight);
+      printImg=img; printDataUrl=dataUrl;
+      document.getElementById('pr-nm').textContent=file.name;
+      document.getElementById('chg-pr').style.display='';
+      document.getElementById('uov-pr').style.display='none';
+      renderCanvas(img);
+      updateStatus();
+      // Try get DPI
+      tryGetDpi(dataUrl.split(',')[1]);
+    };
+    img.onerror=()=>alert('Không load được ảnh!');
+    img.src=dataUrl;
+  };
+  reader.readAsDataURL(file);
+}
 
-  try{
-    const dpi = awFile.dpi || CAL.dpi || null;
-    const sens = parseInt(document.getElementById('sens').value);
-    const chkTxt = document.getElementById('chk-txt').checked;
-
-    const res = await fetch('/api/analyze',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        awImage:    awCrop,
-        printImage: prCrop,
-        awFileData: awFile.b64,
-        awFileType: awFile.type || 'image',
-        sensitivity: sens,
-        checkText:  chkTxt,
-        manualDpi:  dpi ? Math.round(dpi) : null,
-        mode:       'direct',
-      })
+function renderCanvas(img){
+  const ca=document.getElementById('ca-pr');
+  let cv=document.getElementById('cv-pr');
+  if(!cv){ cv=document.createElement('canvas'); cv.id='cv-pr'; cv.style.position='absolute'; ca.appendChild(cv); }
+  cv.style.display='block';
+  const W=Math.max(ca.offsetWidth,300); const H=280;
+  const sc=Math.min(W/img.naturalWidth,H/img.naturalHeight,1);
+  const cw=Math.round(img.naturalWidth*sc); const ch=Math.round(img.naturalHeight*sc);
+  cv.width=cw; cv.height=ch;
+  cv.style.width=cw+'px'; cv.style.height=ch+'px';
+  cv.style.left=Math.round((W-cw)/2)+'px';
+  cv.style.top=Math.round((H-ch)/2)+'px';
+  cv.getContext('2d').drawImage(img,0,0,cw,ch);
+  cv.dataset.sc=sc;
+  // Bind cal click
+  if(!cv.dataset.bound){
+    cv.dataset.bound='1';
+    cv.addEventListener('click',e=>{
+      if(!CAL.active)return;
+      const r=cv.getBoundingClientRect();
+      CAL.pts.push({x:e.clientX-r.left,y:e.clientY-r.top});
+      const dot=document.createElement('div');
+      dot.className='cal-dot';
+      const wr=ca.getBoundingClientRect();
+      dot.style.left=(e.clientX-wr.left)+'px'; dot.style.top=(e.clientY-wr.top)+'px';
+      dot.style.background=CAL.pts.length===1?'var(--warn)':'var(--accent)';
+      ca.appendChild(dot);
+      if(CAL.pts.length>=2){
+        CAL.active=false;
+        const dx=CAL.pts[1].x-CAL.pts[0].x, dy=CAL.pts[1].y-CAL.pts[0].y;
+        CAL.pxDist=Math.sqrt(dx*dx+dy*dy);
+        document.getElementById('cal-btn').textContent='✓ Đã chọn 2 điểm';
+        document.getElementById('cal-ok').textContent=`Khoảng cách: ${Math.round(CAL.pxDist)}px — nhập mm thật và Áp dụng`;
+        document.getElementById('cal-ok').classList.add('show');
+      } else {
+        document.getElementById('cal-btn').textContent='📍 Nhấn điểm 2...';
+      }
     });
-
-    const data = await res.json();
-    stopProg(); loader.classList.remove('show');
-
-    if(!res.ok || data.error){
-      alert('Lỗi server:\n' + (data.error||'Unknown') + (data.trace?'\n\n'+data.trace.slice(0,500):''));
-      return;
-    }
-    renderResults(data, awCrop, prCrop);
-  } catch(e){
-    stopProg(); loader.classList.remove('show');
-    alert('Lỗi kết nối: ' + e.message);
   }
 }
 
-// ── Render results ────────────────────────────────────────────────────────────
-const DC={dot:'#00ffee',spot:'#00c8ff',hickey:'#0066ff',scratch:'#ff44cc',streak:'#ff8c00',
-          missing_ink:'#00ff96',extra_ink:'#ff3333',blur:'#ffdd00',anomaly:'#aaaaaa',
-          wrong_diacritic:'#ff0066',missing_punct:'#ff00cc',wrong_char:'#cc00ff',missing_word:'#ff6600'};
-const DL={dot:'Dot/chấm',spot:'Spot/đốm',hickey:'Hickey',scratch:'Xước/vệt dài',streak:'Vệt/sọc',
-          missing_ink:'Thiếu mực',extra_ink:'Thừa mực',blur:'Nhòe/mờ',anomaly:'Bất thường',
-          wrong_diacritic:'Sai dấu thanh',missing_punct:'Thiếu dấu câu',wrong_char:'Sai ký tự',missing_word:'Thiếu từ'};
-function h2r(h){ const n=parseInt(h.replace('#',''),16)||0xAAAAAA; return`${(n>>16)&0xff},${(n>>8)&0xff},${n&0xff}`; }
+async function tryGetDpi(b64){
+  try{
+    const r=await fetch('/api/get_aw_info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fileData:b64,fileType:'image'})});
+    const info=await r.json();
+    const bar=document.getElementById('dpi-bar');
+    bar.style.display='';
+    if(info.dpi){
+      calDpi=info.dpi;
+      bar.className='dpi-bar ok';
+      bar.textContent=`✓ DPI=${Math.round(info.dpi)} từ metadata ảnh`;
+      document.getElementById('calbox').classList.remove('show');
+    } else {
+      bar.className='dpi-bar warn';
+      bar.textContent='⚠ Không đọc được DPI — calibration tùy chọn bên dưới';
+      document.getElementById('calbox').classList.add('show');
+    }
+  }catch(e){}
+}
 
-function renderResults(data, awB64, prB64){
-  const {verdict,defect_count,fail_count,warn_count,defects,result_color,result_dotmap,ai_summary,dpi_aw,aw_size} = data;
-  const panel = document.getElementById('results');
+function startCal(){
+  CAL.active=true; CAL.pts=[]; CAL.pxDist=null;
+  document.querySelectorAll('.cal-dot').forEach(d=>d.remove());
+  document.getElementById('cal-btn').textContent='📍 Nhấn điểm 1 trên ảnh...';
+  document.getElementById('cal-ok').classList.remove('show');
+}
+function applyCal(){
+  if(!CAL.pxDist){alert('Cần chọn 2 điểm trước!');return;}
+  const mm=parseFloat(document.getElementById('cal-mm').value);
+  if(!mm||mm<=0){alert('Nhập mm hợp lệ!');return;}
+  const cv=document.getElementById('cv-pr');
+  const sc=parseFloat(cv.dataset.sc||1);
+  calDpi=(CAL.pxDist/mm)*25.4/sc;
+  const el=document.getElementById('cal-ok');
+  el.textContent=`✓ DPI=${Math.round(calDpi)} (${mm}mm / ${Math.round(CAL.pxDist)}px)`;
+  el.classList.add('show');
+  document.getElementById('dpi-bar').className='dpi-bar ok';
+  document.getElementById('dpi-bar').textContent=`✓ Calibration: DPI=${Math.round(calDpi)}`;
+}
+
+function updateStatus(){
+  const has=!!printImg;
+  document.getElementById('rbtn').disabled=!has;
+  document.getElementById('sdot').className=has?'sdot ready':'sdot';
+  document.getElementById('stxt').textContent=has?'Sẵn sàng phân tích — nhấn nút →':'Tải ảnh tờ in để bắt đầu';
+}
+
+async function runAnalysis(){
+  if(!printDataUrl){alert('Cần upload ảnh!');return;}
+  document.getElementById('loader').classList.add('show');
+  startProg();
+  try{
+    const sens=parseInt(document.getElementById('sens').value);
+    const res=await fetch('/api/analyze',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        printImage: printDataUrl.split(',')[1],
+        sensitivity: sens,
+        manualDpi: calDpi?Math.round(calDpi):null,
+        checkText: false,
+      })
+    });
+    const data=await res.json();
+    stopProg(); document.getElementById('loader').classList.remove('show');
+    if(data.error){alert('Lỗi server:\n'+data.error+(data.trace?'\n\n'+data.trace.slice(0,400):''));return;}
+    renderResults(data);
+  }catch(e){
+    stopProg(); document.getElementById('loader').classList.remove('show');
+    alert('Lỗi kết nối: '+e.message);
+  }
+}
+
+const DC={spot:'#00c8ff',dot:'#00ffee',hickey:'#0066ff',blur:'#ffdd00',smear:'#ff8c00',scratch:'#ff44cc',dirt:'#aa44ff',noise:'#aaaaaa',stain:'#3333ff'};
+const DL={spot:'Spot/đốm',dot:'Dot/chấm',hickey:'Hickey',blur:'Nhòe/mờ',smear:'Lem mực',scratch:'Xước/vệt',dirt:'Bẩn',noise:'Bất thường',stain:'Vệt bẩn'};
+function h2r(h){const n=parseInt(h.replace('#',''),16)||0xAAAAAA;return`${(n>>16)&255},${(n>>8)&255},${n&255}`;}
+
+function renderResults(data){
+  const {result,defect_count,fail_count,warn_count,spot_count,blur,scratch,noise_area,laplacian_var,defects,result_color,result_dotmap,ai_summary,dpi_used,image_size,pipeline}=data;
+  const panel=document.getElementById('results');
   panel.classList.add('show');
   setTimeout(()=>panel.scrollIntoView({behavior:'smooth',block:'start'}),100);
 
-  const vb = document.getElementById('vb');
-  vb.className = 'vb v'+verdict;
-  vb.textContent = verdict==='FAIL'?'✗ LỖI PHÁT HIỆN':verdict==='WARN'?'⚠ CẦN KIỂM TRA':'✓ ĐẠT CHUẨN';
+  const vb=document.getElementById('vb');
+  vb.className='vb v'+result;
+  vb.textContent=result==='NG'?'✗ NG — PHÁT HIỆN LỖI':result==='WARN'?'⚠ WARN — CẦN KIỂM TRA':'✓ OK — ĐẠT CHUẨN';
 
-  const alignOk = data.align_method && !data.align_method.includes('fallback');
-  const ssimPct = data.ssim_score ? Math.round(data.ssim_score*100) : '?';
-  const alignColor = alignOk ? 'var(--ok)' : 'var(--warn)';
   document.getElementById('stats').innerHTML=`
     <div class="stat"><div class="snum" style="color:var(--danger)">${defect_count}</div><div class="slbl">Tổng lỗi</div></div>
     <div class="stat"><div class="snum" style="color:var(--danger)">${fail_count}</div><div class="slbl">FAIL</div></div>
     <div class="stat"><div class="snum" style="color:var(--warn)">${warn_count}</div><div class="slbl">WARN</div></div>
-    <div class="stat"><div class="snum" style="color:${alignColor};font-size:11px">${alignOk?'✓':'⚠'} Align</div><div class="slbl">${(data.align_method||'?').split('_')[0]}</div></div>
-    <div class="stat"><div class="snum" style="color:var(--accent);font-size:13px">${ssimPct}%</div><div class="slbl">SSIM</div></div>
-    <div class="stat"><div class="snum" style="color:var(--muted);font-size:11px">${data.diff_pct||'?'}%</div><div class="slbl">Diff</div></div>`;
+    <div class="stat"><div class="snum" style="color:var(--a2)">${spot_count}</div><div class="slbl">Spots</div></div>
+    <div class="stat"><div class="snum" style="color:${blur?'var(--danger)':'var(--ok)'}">${blur?'✗':'✓'}</div><div class="slbl">Blur</div></div>
+    <div class="stat"><div class="snum" style="color:${scratch?'var(--warn)':'var(--ok)'}">${scratch?'✗':'✓'}</div><div class="slbl">Scratch</div></div>
+    <div class="stat"><div class="snum" style="color:var(--muted);font-size:10px">${laplacian_var}</div><div class="slbl">Sharpness</div></div>`;
 
-  const imAW = document.getElementById('im-aw');
-  imAW.src = 'data:image/jpeg;base64,'+awB64; imAW.style.display='block';
-  document.getElementById('im-color').src = 'data:image/png;base64,'+result_color;
-  document.getElementById('im-dot').src   = 'data:image/png;base64,'+result_dotmap;
+  document.getElementById('im-color').src='data:image/png;base64,'+result_color;
+  document.getElementById('im-dot').src='data:image/png;base64,'+result_dotmap;
 
-  document.getElementById('dlhdr').textContent = defects.length ? `${defects.length} lỗi phát hiện` : '✓ Không phát hiện lỗi';
-  document.getElementById('dgrid').innerHTML = (defects||[]).map((d,i)=>{
+  document.getElementById('dlhdr').textContent=defects.length?`${defects.length} lỗi phát hiện`:'✓ Không phát hiện lỗi';
+  document.getElementById('dgrid').innerHTML=(defects||[]).map((d,i)=>{
     const c=DC[d.type]||'#aaa';
     const vc=d.verdict==='FAIL'?'var(--danger)':d.verdict==='WARN'?'var(--warn)':'var(--muted)';
-    const vi=d.verdict==='FAIL'?'✗ FAIL':d.verdict==='WARN'?'⚠ WARN':'○';
-    const tb=d.is_text?'<span class="tbadge">VĂN BẢN</span>':'';
-    const meta=d.is_text
-      ?`<span style="color:var(--danger)">✗ FAIL</span> · ${d.detail||''}`
-      :`<span style="color:${vc};font-weight:600">${vi}</span> · <b style="color:var(--text)">${d.size_str||''}</b>`;
+    const vi=d.verdict==='FAIL'?'✗ FAIL':'⚠ WARN';
     return`<div class="dcard" style="border-color:rgba(${h2r(c)},.3)">
       <div class="dnum" style="background:${c}">${i+1}</div>
-      <div><div class="dtype" style="color:${c}">${d.label||DL[d.type]||d.type}${tb}</div>
-      <div class="dmeta">${meta}</div></div></div>`;
+      <div><div class="dtype" style="color:${c}">${d.label||DL[d.type]||d.type}</div>
+      <div class="dmeta"><span style="color:${vc};font-weight:600">${vi}</span> · <b style="color:var(--text)">${d.size_str||''}</b></div></div></div>`;
   }).join('');
 
-  if(ai_summary){ document.getElementById('aisec').style.display=''; document.getElementById('aitxt').textContent=ai_summary; }
+  if(pipeline&&pipeline.length){
+    document.getElementById('pipelog').style.display='';
+    document.getElementById('pipelog-txt').innerHTML=pipeline.map(s=>`▸ ${s}`).join('<br>');
+  }
+  if(ai_summary){
+    document.getElementById('aisec').style.display='';
+    document.getElementById('aitxt').textContent=ai_summary;
+  }
   stab('color');
 }
 
-function stab(name){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['color','dot','list'][i]===name));
+function stab(n){
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['color','dot','list'][i]===n));
   document.querySelectorAll('.tp').forEach(p=>p.classList.remove('active'));
-  document.getElementById('tp-'+name).classList.add('active');
+  document.getElementById('tp-'+n).classList.add('active');
 }
 function updSens(){
   const v=parseInt(document.getElementById('sens').value);
   document.getElementById('sv').textContent=v;
-  const m={10:'Cực nhạy',20:'Rất nhạy',28:'Cân bằng',40:'Ít nhạy',55:'Chỉ lỗi rõ',70:'Lỗi nghiêm trọng'};
+  const m={10:'Cực nhạy',20:'Rất nhạy',30:'Cân bằng',45:'Ít nhạy',60:'Chỉ lỗi rõ',70:'Lỗi nghiêm trọng'};
   const k=Object.keys(m).map(Number);
   document.getElementById('sh').textContent=m[k.reduce((a,b)=>Math.abs(b-v)<Math.abs(a-v)?b:a)];
 }
-function zm(src){ document.getElementById('zm-img').src=src; document.getElementById('zm-modal').classList.add('show'); }
-function closeZm(){ document.getElementById('zm-modal').classList.remove('show'); }
+function zm(s){document.getElementById('zm-img').src=s;document.getElementById('zm-modal').classList.add('show');}
+function closeZm(){document.getElementById('zm-modal').classList.remove('show');}
 
-window.addEventListener('resize', ()=>{ ['aw','print'].forEach(id=>{ if(S[id].img) renderCanvas(id); }); });
-updateStatus(); updSens(); bindDrop('aw'); bindDrop('print');
+// Drag & drop
+document.addEventListener('DOMContentLoaded',()=>{
+  const ca=document.getElementById('ca-pr');
+  ca.addEventListener('dragover',e=>e.preventDefault());
+  ca.addEventListener('drop',e=>{
+    e.preventDefault();
+    const f=e.dataTransfer.files[0]; if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      const img=new Image();
+      img.onload=()=>{
+        printImg=img; printDataUrl=ev.target.result;
+        document.getElementById('pr-nm').textContent=f.name;
+        document.getElementById('chg-pr').style.display='';
+        document.getElementById('uov-pr').style.display='none';
+        renderCanvas(img); updateStatus();
+        tryGetDpi(ev.target.result.split(',')[1]);
+      };
+      img.src=ev.target.result;
+    };
+    r.readAsDataURL(f);
+  });
+});
+
+updateStatus(); updSens();
 </script>
 </body>
 </html>
