@@ -1,15 +1,9 @@
 """
-QC Print Inspector — Image Registration Pipeline
-=================================================
-Flow: LOAD → REGISTER → NORMALIZE → DIFF → DETECT → RENDER
-
-Registration handles:
-  - rotation (any angle)
-  - scale difference
-  - perspective distortion / camera angle
-  - paper shift / small deformation
-
-Key principle: MUST NOT produce defect from alignment error only.
+QC Print Defect Inspector — No AW Required
+==========================================
+Pipeline: RECEIVE → RESIZE → NORMALIZE → DETECT → RENDER → RETURN
+Detects: spot, dot, hickey, blur, smear, scratch, dirt, noise, stain
+Works with: smartphone photo, different lighting, angle, scale
 """
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -18,35 +12,34 @@ import numpy as np
 import base64, os, math, json, requests
 from io import BytesIO
 from PIL import Image, ExifTags
-from skimage.metrics import structural_similarity as ssim_func
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
-# ── QC Standards ──────────────────────────────────────────────────────────────
-QC = {
-    'dot':         {'warn':0.3,  'fail':0.5},
-    'spot':        {'warn':0.3,  'fail':0.5},
-    'hickey':      {'warn':0.3,  'fail':0.5},
-    'scratch':     {'warn':3.0,  'fail':5.0},
-    'streak':      {'warn':3.0,  'fail':5.0},
-    'missing_ink': {'warn':0.5,  'fail':1.0},
-    'extra_ink':   {'warn':0.5,  'fail':1.0},
-    'blur':        {'warn':0.5,  'fail':1.0},
-    'anomaly':     {'warn':0.3,  'fail':0.5},
+# ── Config ────────────────────────────────────────────────────────────────────
+MAX_SIZE        = 1200   # max dimension after resize (avoid timeout)
+MIN_SPOT_AREA   = 30     # px² minimum spot area
+MIN_SCRATCH_LEN = 40     # px minimum scratch length
+BLUR_THRESHOLD  = 40.0   # Laplacian variance below = blurred image
+TEXTURE_THRESH  = 20     # local texture diff threshold
+NOISE_AREA_LIMIT= 500    # px² max acceptable noise area
+
+DEFECT_COLORS = {
+    'spot':    (0,  200, 255),
+    'dot':     (0,  220, 255),
+    'hickey':  (0,  100, 255),
+    'blur':    (255,220, 0  ),
+    'smear':   (255,140, 0  ),
+    'scratch': (255, 50, 200),
+    'dirt':    (180, 50, 255),
+    'noise':   (180,180, 180),
+    'stain':   (50,  50, 255),
 }
-LABELS = {
-    'dot':'Dot/chấm','spot':'Spot/đốm','hickey':'Hickey',
-    'scratch':'Xước/vệt dài','streak':'Vệt/sọc',
-    'missing_ink':'Thiếu mực','extra_ink':'Thừa mực',
-    'blur':'Nhòe/mờ','anomaly':'Bất thường',
-}
-COLORS = {
-    'dot':(0,220,255),'spot':(0,200,255),'hickey':(0,100,255),
-    'scratch':(255,50,200),'streak':(255,140,0),
-    'missing_ink':(50,255,50),'extra_ink':(255,50,50),
-    'blur':(255,220,0),'anomaly':(180,180,180),
+DEFECT_LABELS = {
+    'spot':'Spot/đốm','dot':'Dot/chấm','hickey':'Hickey',
+    'blur':'Nhòe/mờ','smear':'Lem mực','scratch':'Xước/vệt',
+    'dirt':'Bẩn/tạp chất','noise':'Nhiễu/bất thường','stain':'Vệt bẩn',
 }
 
 def b64_to_cv2(b64):
@@ -61,626 +54,524 @@ def j2b64(img, q=90):
     _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, q])
     return base64.b64encode(buf).decode()
 
-def px2mm(px,dpi):   return px/dpi*25.4
-def mm2px(mm,dpi):   return mm/25.4*dpi
-def a2mm2(a,dpi):    return a/(dpi/25.4)**2
-def diam(a):         return 2*math.sqrt(max(a,0)/math.pi)
-
-def verdict(dtype, val):
-    s = QC.get(dtype, QC['anomaly'])
-    return 'FAIL' if val>=s['fail'] else ('WARN' if val>=s['warn'] else 'PASS')
-
-# ── DPI ───────────────────────────────────────────────────────────────────────
+# ── DPI (optional, for mm sizing) ────────────────────────────────────────────
 def get_dpi(b64, ftype='image'):
-    if ftype=='pdf': return _pdf_dpi(b64)
-    return _img_dpi(b64)
-
-def _pdf_dpi(b64):
     try:
-        import fitz
-        doc = fitz.open(stream=base64.b64decode(b64), filetype='pdf')
-        p=doc[0]; r=p.rect
-        wm=r.width/72*25.4; hm=r.height/72*25.4
-        dpi=300
-        pix=p.get_pixmap(matrix=fitz.Matrix(dpi/72,dpi/72),colorspace=fitz.csRGB)
-        arr=np.frombuffer(pix.tobytes('png'),np.uint8)
-        img=cv2.imdecode(arr,cv2.IMREAD_COLOR)
-        doc.close()
-        return {'dpi':float(dpi),'width_mm':round(wm,2),'height_mm':round(hm,2),
-                'source':f'PDF {wm:.1f}x{hm:.1f}mm@{dpi}dpi','img_cv2':img}
-    except Exception as e:
-        return {'dpi':None,'source':f'pdf_err:{e}'}
-
-def _img_dpi(b64):
-    try:
-        pil=Image.open(BytesIO(base64.b64decode(b64)))
-        w,h=pil.size; dpi=None
-        if 'dpi' in pil.info: dpi=float(pil.info['dpi'][0])
+        pil = Image.open(BytesIO(base64.b64decode(b64)))
+        dpi = None
+        if 'dpi' in pil.info: dpi = float(pil.info['dpi'][0])
         if not dpi:
             try:
-                ex=pil._getexif()
+                ex = pil._getexif()
                 if ex:
                     for tid,v in ex.items():
                         if ExifTags.TAGS.get(tid)=='XResolution':
-                            dpi=float(v[0]/v[1]) if isinstance(v,tuple) else float(v)
+                            dpi = float(v[0]/v[1]) if isinstance(v,tuple) else float(v)
             except: pass
-        cv2img=cv2.cvtColor(np.array(pil.convert('RGB')),cv2.COLOR_RGB2BGR)
-        if dpi and dpi>10:
-            wm=w/dpi*25.4; hm=h/dpi*25.4
-            return {'dpi':dpi,'width_mm':round(wm,2),'height_mm':round(hm,2),
-                    'source':f'EXIF {wm:.1f}x{hm:.1f}mm@{dpi:.0f}dpi','img_cv2':cv2img}
-        return {'dpi':None,'source':'no_dpi','img_cv2':cv2img}
-    except Exception as e:
-        return {'dpi':None,'source':f'err:{e}'}
+        return dpi if (dpi and dpi > 10) else None
+    except: return None
+
+def px2mm(px, dpi): return px/dpi*25.4 if dpi else None
+def a2mm2(a, dpi):  return a/(dpi/25.4)**2 if dpi else None
+def diam_mm(a,dpi): return 2*math.sqrt(max(a,0)/math.pi)/dpi*25.4 if dpi else None
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 1 — IMAGE REGISTRATION
-#  Goal: warp real photo → AW coordinate space
-#  Handles: rotation, scale, perspective, camera angle, shift
+#  PIPELINE — No AW needed
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def register(aw, real):
+def run_pipeline(img_bgr, sensitivity, dpi):
     """
-    Full registration pipeline with fallback chain.
-
-    Returns:
-        warped      : real image warped to AW space (same size as AW)
-        method      : which method succeeded
-        quality     : 0..1 alignment quality score
-        info        : debug dict
+    Full defect detection pipeline on single image.
+    sensitivity: 10 (most sensitive) → 70 (only obvious defects)
     """
-    h, w = aw.shape[:2]
-    info = {}
+    result = {
+        'defects': [],
+        'spot_count': 0,
+        'blur_detected': False,
+        'scratch_detected': False,
+        'noise_area_px': 0,
+        'laplacian_var': 0.0,
+        'pipeline_steps': [],
+    }
 
-    # Pre-resize real to AW dimensions (coarse alignment)
-    real_r = cv2.resize(real, (w, h), interpolation=cv2.INTER_AREA)
+    # ── Step 1: Resize ──
+    img, scale = _step_resize(img_bgr)
+    result['pipeline_steps'].append(f'resize: {img_bgr.shape[1]}x{img_bgr.shape[0]} → {img.shape[1]}x{img.shape[0]} (scale={scale:.3f})')
 
-    # Enhance contrast before feature detection
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    ag = cv2.cvtColor(aw,     cv2.COLOR_BGR2GRAY)
-    rg = cv2.cvtColor(real_r, cv2.COLOR_BGR2GRAY)
-    ag_e = clahe.apply(ag)
-    rg_e = clahe.apply(rg)
+    # ── Step 2: Convert to gray ──
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # ── Method 1: SIFT homography (best for scale + perspective) ──
-    result = _feature_homography(aw, real_r, ag_e, rg_e, w, h, 'SIFT', info)
-    if result is not None:
-        warped, H, q = result
-        # ECC sub-pixel refinement on top of homography
-        warped = _ecc_refine(aw, warped, ag, w, h)
-        info['final'] = 'SIFT_homography+ECC'
-        return warped, 'SIFT+ECC', q, info
+    # ── Step 3: Normalize brightness ──
+    gray_norm = _step_normalize(gray)
+    result['pipeline_steps'].append('normalize brightness')
 
-    # ── Method 2: ORB homography (faster, works on low-texture) ──
-    result = _feature_homography(aw, real_r, ag_e, rg_e, w, h, 'ORB', info)
-    if result is not None:
-        warped, H, q = result
-        warped = _ecc_refine(aw, warped, ag, w, h)
-        info['final'] = 'ORB_homography+ECC'
-        return warped, 'ORB+ECC', q, info
+    # ── Step 4: Denoise ──
+    gray_dn = cv2.GaussianBlur(gray_norm, (5,5), 0)
+    result['pipeline_steps'].append('denoise GaussianBlur(5,5)')
 
-    # ── Method 3: AKAZE (robust for blurry / low-contrast) ──
-    result = _feature_homography(aw, real_r, ag_e, rg_e, w, h, 'AKAZE', info)
-    if result is not None:
-        warped, H, q = result
-        warped = _ecc_refine(aw, warped, ag, w, h)
-        info['final'] = 'AKAZE_homography+ECC'
-        return warped, 'AKAZE+ECC', q, info
+    # ── Step 5: Detect blur / smudge ──
+    lap_var = _step_detect_blur(gray_norm)
+    result['laplacian_var'] = round(lap_var, 2)
+    blur_thresh = BLUR_THRESHOLD * (1 + (sensitivity-30)/100.0)
+    if lap_var < blur_thresh:
+        result['blur_detected'] = True
+        result['defects'].append({
+            'type': 'blur',
+            'label': 'Nhòe/mờ toàn vùng',
+            'detail': f'Laplacian variance={lap_var:.1f} < {blur_thresh:.1f}',
+            'x': 0, 'y': 0,
+            'w': img.shape[1], 'h': img.shape[0],
+            'verdict': 'FAIL',
+            'severity': 'high',
+            'size_str': 'toàn vùng',
+        })
+    result['pipeline_steps'].append(f'blur check: lap_var={lap_var:.1f} blur={result["blur_detected"]}')
 
-    # ── Method 4: Pure ECC (translation + rotation, no perspective) ──
-    warped = _ecc_full(aw, real_r, ag, w, h)
-    info['final'] = 'ECC_only'
-    return warped, 'ECC', 0.4, info
+    # ── Step 6: Detect spot / dot / dirt / hickey ──
+    spot_defects = _step_detect_spots(gray_dn, img, sensitivity, dpi, scale)
+    result['defects'].extend(spot_defects)
+    result['spot_count'] = len(spot_defects)
+    result['pipeline_steps'].append(f'spot detect: found {len(spot_defects)}')
+
+    # ── Step 7: Detect scratch / line defect ──
+    scratch_defects, scratch_found = _step_detect_scratches(gray_dn, img, sensitivity, dpi, scale)
+    result['defects'].extend(scratch_defects)
+    result['scratch_detected'] = scratch_found
+    result['pipeline_steps'].append(f'scratch detect: found {len(scratch_defects)}')
+
+    # ── Step 8: Detect smear / stain (large ink spread) ──
+    smear_defects = _step_detect_smear(gray_dn, img, sensitivity, dpi, scale)
+    result['defects'].extend(smear_defects)
+    result['pipeline_steps'].append(f'smear detect: found {len(smear_defects)}')
+
+    # ── Step 9: Detect abnormal texture / noise area ──
+    noise_defects, noise_area = _step_detect_noise(gray_dn, img, sensitivity, dpi, scale)
+    result['defects'].extend(noise_defects)
+    result['noise_area_px'] = noise_area
+    result['pipeline_steps'].append(f'noise detect: area={noise_area}px found={len(noise_defects)}')
+
+    # ── Sort by severity ──
+    result['defects'].sort(key=lambda d: d.get('severity','medium')=='high', reverse=True)
+
+    return result, img
 
 
-def _feature_homography(aw, real, ag_e, rg_e, w, h, det_name, info):
+# ── Step 1: Resize ────────────────────────────────────────────────────────────
+def _step_resize(img):
+    h, w = img.shape[:2]
+    scale = min(MAX_SIZE/max(h,w), 1.0)
+    if scale < 1.0:
+        img = cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+    return img, scale
+
+
+# ── Step 3: Normalize ────────────────────────────────────────────────────────
+def _step_normalize(gray):
+    return cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+
+# ── Step 5: Blur detection ───────────────────────────────────────────────────
+def _step_detect_blur(gray):
+    """Laplacian variance — low = blurry image."""
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+# ── Step 6: Spot / dot / dirt / hickey ──────────────────────────────────────
+def _step_detect_spots(gray, img, sensitivity, dpi, img_scale):
     """
-    Feature detection → matching → homography → warpPerspective.
-    Returns (warped, H, quality) or None if failed.
+    Detect dark/light blobs on surface using adaptive threshold.
+    Classifies by shape + size into: dot, spot, hickey, dirt.
     """
-    try:
-        # Select detector
-        if det_name == 'SIFT':
-            det  = cv2.SIFT_create(nfeatures=4000, contrastThreshold=0.01, edgeThreshold=15)
-            norm = cv2.NORM_L2
-        elif det_name == 'ORB':
-            det  = cv2.ORB_create(nfeatures=4000, scaleFactor=1.2, nlevels=12, edgeThreshold=15)
-            norm = cv2.NORM_HAMMING
-        elif det_name == 'AKAZE':
-            det  = cv2.AKAZE_create()
-            norm = cv2.NORM_HAMMING
-        else:
-            return None
+    defects = []
+    h, w = gray.shape[:2]
 
-        # Detect keypoints
-        kp1, des1 = det.detectAndCompute(ag_e, None)
-        kp2, des2 = det.detectAndCompute(rg_e, None)
+    # Adaptive threshold: removes uneven background lighting
+    block = max(11, (min(h,w)//20) | 1)   # must be odd
+    th_adapt = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        block, 8
+    )
 
-        info[f'{det_name}_kp'] = f'{len(kp1) if kp1 else 0}/{len(kp2) if kp2 else 0}'
-
-        if des1 is None or des2 is None:
-            return None
-        if len(kp1) < 8 or len(kp2) < 8:
-            return None
-
-        # Match with Lowe ratio test
-        matcher = cv2.BFMatcher(norm, crossCheck=False)
-        raw = matcher.knnMatch(des1, des2, k=2)
-        good = [m for m,n in raw if m.distance < 0.72 * n.distance] if raw and len(raw[0])==2 else []
-
-        info[f'{det_name}_matches'] = len(good)
-
-        if len(good) < 8:
-            return None
-
-        src = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
-        dst = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
-
-        # RANSAC homography
-        # findHomography: maps dst (real) → src (AW)
-        H, mask = cv2.findHomography(
-            dst, src,
-            cv2.RANSAC,
-            ransacReprojThreshold=4.0,
-            maxIters=3000,
-            confidence=0.995
-        )
-
-        if H is None:
-            return None
-
-        inliers      = int(mask.sum()) if mask is not None else 0
-        inlier_ratio = inliers / len(good)
-        info[f'{det_name}_inliers'] = f'{inliers}/{len(good)} ratio={inlier_ratio:.2f}'
-
-        if inlier_ratio < 0.20 or inliers < 6:
-            return None
-
-        if not _valid_H(H, w, h):
-            info[f'{det_name}_H'] = 'degenerate'
-            return None
-
-        # warpPerspective: transform real → AW coordinate space
-        warped = cv2.warpPerspective(
-            real, H, (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REPLICATE
-        )
-
-        quality = min(1.0, inlier_ratio * min(inliers/30.0, 1.0))
-        print(f'[{det_name}] kp={len(kp1)}/{len(kp2)} good={len(good)} '
-              f'inliers={inliers} ratio={inlier_ratio:.2f} quality={quality:.2f}')
-        return warped, H, quality
-
-    except Exception as e:
-        info[f'{det_name}_err'] = str(e)
-        return None
-
-
-def _valid_H(H, w, h):
-    """Reject degenerate homography (extreme distortion / collapse / flip)."""
-    corners = np.float32([[0,0],[w,0],[w,h],[0,h]]).reshape(-1,1,2)
-    try:
-        wc = cv2.perspectiveTransform(corners, H).reshape(4,2)
-    except Exception:
-        return False
-
-    # Area ratio check
-    area  = cv2.contourArea(wc)
-    ratio = area / (w * h)
-    if ratio < 0.05 or ratio > 25.0:
-        return False
-
-    # Convexity check (no self-intersecting quad)
-    hull = cv2.convexHull(wc.astype(np.float32))
-    if len(hull) != 4:
-        return False
-
-    # Minimum angle check (reject extreme shear)
-    for i in range(4):
-        a = wc[i]; b = wc[(i+1)%4]; c = wc[(i+2)%4]
-        v1 = b-a; v2 = c-b
-        n1 = np.linalg.norm(v1); n2 = np.linalg.norm(v2)
-        if n1 < 1 or n2 < 1:
-            return False
-        cos_a = np.dot(v1,v2)/(n1*n2)
-        if abs(cos_a) > 0.96:   # angle < ~16° → degenerate
-            return False
-    return True
-
-
-def _ecc_refine(aw, warped, ag, w, h):
-    """Sub-pixel ECC refinement after homography."""
-    rg = cv2.cvtColor(cv2.resize(warped,(w,h)), cv2.COLOR_BGR2GRAY)
-    warp = np.eye(2,3,dtype=np.float32)
-    crit = (cv2.TERM_CRITERIA_EPS|cv2.TERM_CRITERIA_COUNT, 300, 1e-7)
-    try:
-        _, warp = cv2.findTransformECC(
-            ag.astype(np.float32), rg.astype(np.float32),
-            warp, cv2.MOTION_EUCLIDEAN, crit, None, 5
-        )
-        return cv2.warpAffine(warped, warp, (w,h),
-                               flags=cv2.INTER_LINEAR+cv2.WARP_INVERSE_MAP,
-                               borderMode=cv2.BORDER_REPLICATE)
-    except Exception:
-        return warped
-
-
-def _ecc_full(aw, real, ag, w, h):
-    """Full ECC alignment when feature matching fails completely."""
-    rg = cv2.cvtColor(real, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    warp = np.eye(2,3,dtype=np.float32)
-    crit = (cv2.TERM_CRITERIA_EPS|cv2.TERM_CRITERIA_COUNT, 500, 1e-7)
-    try:
-        _, warp = cv2.findTransformECC(
-            ag.astype(np.float32), rg, warp,
-            cv2.MOTION_EUCLIDEAN, crit, None, 5
-        )
-        return cv2.warpAffine(real, warp, (w,h),
-                               flags=cv2.INTER_LINEAR+cv2.WARP_INVERSE_MAP,
-                               borderMode=cv2.BORDER_REPLICATE)
-    except Exception:
-        return real
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 2 — NORMALIZE
-#  Removes camera exposure difference, NOT real defects
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def normalize(aw, warped):
-    """
-    Match global brightness/contrast of warped to AW.
-    Use gentle Gaussian blur to suppress sensor noise.
-    """
-    h, w = aw.shape[:2]
-    warped = cv2.resize(warped, (w,h))
-
-    ag = cv2.cvtColor(aw,     cv2.COLOR_BGR2GRAY)
-    rg = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-
-    aw_mean, aw_std = float(np.mean(ag)), float(np.std(ag))
-    r_mean,  r_std  = float(np.mean(rg)), float(np.std(rg))
-
-    scale  = aw_std / max(r_std, 1.0)
-    offset = aw_mean - r_mean * scale
-
-    # Apply global correction to BGR
-    warped_n = np.clip(warped.astype(np.float32)*scale+offset, 0, 255).astype(np.uint8)
-
-    # Convert to gray + blur (noise reduction, NOT defect removal)
-    ag_b = cv2.GaussianBlur(ag,                                    (3,3), 0.8)
-    rg_n = cv2.cvtColor(warped_n, cv2.COLOR_BGR2GRAY)
-    rg_b = cv2.GaussianBlur(rg_n,                                  (3,3), 0.8)
-
-    return ag_b, rg_b, aw, warped_n
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 3 — DIFF + THRESHOLD
-#  SSIM + LAB + Edge combined. Adaptive threshold based on MAD.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def diff_and_threshold(ag, rg, aw_bgr, real_bgr, sensitivity):
-    """
-    Multi-method diff with adaptive threshold.
-
-    Adaptive threshold using MAD (Median Absolute Deviation):
-      thresh = median + k * MAD * 1.4826
-    This AUTOMATICALLY adjusts based on alignment quality:
-      - Good alignment → low noise → low MAD → catches small defects
-      - Poor alignment → high noise → high MAD → ignores alignment artifacts
-    """
-    h, w = ag.shape[:2]
-
-    # A. SSIM map
-    win = max(3, min(11, min(h,w)//8 | 1))
-    try:
-        score, ssim_map = ssim_func(ag, rg, win_size=win, full=True, data_range=255)
-        map_ssim = np.clip(1.0-(ssim_map+1.0)/2.0, 0, 1).astype(np.float32)
-    except Exception:
-        score=1.0; map_ssim=np.zeros((h,w),np.float32)
-
-    # B. LAB perceptual diff
-    aL = cv2.cvtColor(aw_bgr,   cv2.COLOR_BGR2LAB).astype(np.float32)
-    rL = cv2.cvtColor(real_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    dL  = np.abs(aL[:,:,0]-rL[:,:,0])
-    dAB = np.sqrt((aL[:,:,1]-rL[:,:,1])**2+(aL[:,:,2]-rL[:,:,2])**2)
-    map_lab = np.clip(dL/100.0*0.6+dAB/180.0*0.4, 0, 1).astype(np.float32)
-
-    # C. Edge diff (detects missing/extra lines at ±1px tolerance)
-    ae = cv2.Canny(ag,30,100).astype(np.float32)/255.0
-    re = cv2.Canny(rg,30,100).astype(np.float32)/255.0
-    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
-    map_edge = np.abs(cv2.dilate(ae,k3)-cv2.dilate(re,k3)).astype(np.float32)
+    # Also Otsu for global blobs
+    _, th_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # Combine
-    heat = map_ssim*0.40 + map_lab*0.35 + map_edge*0.25
-    heat = np.clip(heat,0,1).astype(np.float32)
+    th = cv2.bitwise_or(th_adapt, th_otsu)
 
-    # Adaptive threshold with MAD
-    flat   = heat.flatten()
-    med    = float(np.median(flat))
-    mad    = float(np.median(np.abs(flat-med)))
-    rstd   = mad * 1.4826   # robust std estimate
+    # Remove tiny noise
+    k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2,2))
+    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k2)
 
-    # k: 10→2.5  30→3.5  70→5.5
-    k = 2.5 + (sensitivity-10)/60.0 * 3.0
-    thresh = max(med + k*rstd, sensitivity/250.0, 0.06)
+    # Adjust min area by sensitivity
+    # sensitivity 10 → min area 8px  |  30 → 30px  |  70 → 100px
+    min_area = MIN_SPOT_AREA * (0.3 + sensitivity/50.0)
 
-    print(f'SSIM={score:.3f} med={med:.4f} MAD={mad:.4f} k={k:.1f} thresh={thresh:.4f}')
-
-    binary = (heat > thresh).astype(np.uint8)*255
-
-    # Morphological noise removal
-    ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2,2))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  ko)
-    kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(4,4))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kc)
-
-    return heat, binary, float(score)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 4 — DEFECT DETECTION
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def detect(binary, heat, aw_bgr, real_bgr, dpi):
-    contours,_ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = []
-    min_area = math.pi * mm2px(0.10,dpi)**2  # min 0.1mm radius
+    contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < max(min_area,3): continue
+        if area < min_area: continue
+
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        # Ignore very large contours (likely background boundary, not defect)
+        if area > h*w*0.15: continue
+
+        perim = cv2.arcLength(cnt, True)
+        circ  = 4*math.pi*area/perim**2 if perim>0 else 0
+        aspect= max(bw,bh)/max(min(bw,bh),1)
+
+        # Classify
+        if circ > 0.6 and max(bw,bh) < 15:
+            dtype = 'dot'
+        elif circ > 0.5 and max(bw,bh) < 30:
+            dtype = 'spot'
+        elif circ > 0.4:
+            # Hickey = ring-like, often has bright center
+            roi = gray[y:y+bh, x:x+bw]
+            if roi.size > 0:
+                center_bright = float(np.mean(roi[bh//3:2*bh//3, bw//3:2*bw//3])) if bh>6 and bw>6 else 0
+                edge_dark     = float(np.mean(roi))
+                dtype = 'hickey' if center_bright > edge_dark+15 else 'spot'
+            else:
+                dtype = 'spot'
+        else:
+            dtype = 'dirt'
+
+        # Compute real size if DPI available
+        real_scale = img_scale  # account for resize
+        a_real     = area / (real_scale**2)
+        diam       = 2*math.sqrt(a_real/math.pi)
+        diam_mm_v  = diam_mm(a_real, dpi) if dpi else None
+        size_str   = f'⌀{diam_mm_v:.2f}mm' if diam_mm_v else f'⌀{diam:.0f}px'
+
+        # Verdict
+        if diam_mm_v:
+            v = 'FAIL' if diam_mm_v>=0.5 else ('WARN' if diam_mm_v>=0.3 else 'WARN')
+        else:
+            v = 'FAIL' if diam>=8 else 'WARN'
+
+        defects.append({
+            'type': dtype, 'label': DEFECT_LABELS[dtype],
+            'x':int(x), 'y':int(y), 'w':int(bw), 'h':int(bh),
+            'area_px': int(area),
+            'diameter_px': round(diam,1),
+            'diameter_mm': round(diam_mm_v,3) if diam_mm_v else None,
+            'size_str': size_str,
+            'verdict': v,
+            'severity': 'high' if v=='FAIL' else 'medium',
+        })
+
+    return defects
+
+
+# ── Step 7: Scratch / line defect ────────────────────────────────────────────
+def _step_detect_scratches(gray, img, sensitivity, dpi, img_scale):
+    """
+    Detect scratches using Canny + HoughLinesP.
+    Long thin lines = scratch.
+    """
+    defects = []
+    h, w = gray.shape[:2]
+
+    edges = cv2.Canny(gray, 40, 120)
+
+    # Adjust min line length by sensitivity
+    min_len = max(20, MIN_SCRATCH_LEN * (0.4 + sensitivity/100.0))
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1, theta=np.pi/180,
+        threshold=max(15, int(30*(sensitivity/30.0))),
+        minLineLength=min_len,
+        maxLineGap=8
+    )
+
+    scratch_found = False
+    if lines is not None:
+        for ln in lines:
+            x1,y1,x2,y2 = ln[0]
+            length = math.sqrt((x2-x1)**2+(y2-y1)**2)
+            dx = abs(x2-x1); dy = abs(y2-y1)
+            # True scratch: long AND thin (high aspect)
+            if length < min_len: continue
+            angle = math.degrees(math.atan2(dy,dx+1e-6))
+            # Not horizontal/vertical grid lines (those are likely borders)
+            if angle < 2 or angle > 88:
+                continue  # skip near-perfect H/V lines (likely image border)
+
+            scratch_found = True
+            xm = min(x1,x2); ym = min(y1,y2)
+            bw = max(abs(x2-x1),3); bh = max(abs(y2-y1),3)
+
+            length_mm_v = px2mm(length/img_scale, dpi)
+            size_str = f'{length_mm_v:.1f}mm' if length_mm_v else f'{length:.0f}px'
+            v = 'FAIL' if (length_mm_v and length_mm_v>=5.0) or length>=60 else 'WARN'
+
+            defects.append({
+                'type':'scratch','label':'Xước/vệt dài',
+                'x':int(xm),'y':int(ym),'w':int(bw),'h':int(bh),
+                'length_px': round(length,1),
+                'length_mm': round(length_mm_v,2) if length_mm_v else None,
+                'size_str': size_str,
+                'verdict': v,
+                'severity':'high' if v=='FAIL' else 'medium',
+            })
+
+    return defects, scratch_found
+
+
+# ── Step 8: Smear / stain (large ink area) ───────────────────────────────────
+def _step_detect_smear(gray, img, sensitivity, dpi, img_scale):
+    """
+    Detect smear = large area of ink spread.
+    Uses morphological gradient to find ink boundaries.
+    """
+    defects = []
+    h, w = gray.shape[:2]
+
+    # Morphological gradient: highlights ink edges and smears
+    k7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7))
+    grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, k7)
+
+    _, th = cv2.threshold(grad, 0, 255, cv2.THRESH_OTSU)
+
+    # Close to form blobs
+    kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(11,11))
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kc)
+
+    # Min area for smear: larger than spot
+    min_area = max(200, 600*(sensitivity/50.0))
+
+    contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area: continue
+        if area > h*w*0.20: continue  # skip background
 
         x,y,bw,bh = cv2.boundingRect(cnt)
-        aspect = max(bw,bh)/max(min(bw,bh),1)
+        perim = cv2.arcLength(cnt,True)
+        circ  = 4*math.pi*area/perim**2 if perim>0 else 0
 
-        mk = np.zeros(binary.shape,np.uint8)
-        cv2.drawContours(mk,[cnt],-1,255,-1)
-        mh = float(cv2.mean(heat,mask=mk)[0])
+        # Smear = irregular shape (low circularity, elongated)
+        if circ > 0.5: continue  # too circular = spot, handled above
 
-        dtype = _classify(cnt,area,bw,bh,aspect,aw_bgr,real_bgr,dpi)
-        if dtype is None: continue
+        a_real = area/(img_scale**2)
+        amm2   = a2mm2(a_real, dpi)
+        size_str = f'{amm2:.2f}mm²' if amm2 else f'{a_real:.0f}px²'
+        v = 'FAIL' if (amm2 and amm2>=1.0) or a_real>=400 else 'WARN'
 
-        # Size
-        amm2 = a2mm2(area,dpi); dm = diam(amm2)
-        lm = px2mm(max(bw,bh),dpi); wm = px2mm(min(bw,bh),dpi)
-
-        if dtype in ('dot','spot','hickey'):   meas=dm;   ss=f'⌀{dm:.2f}mm'
-        elif dtype in ('scratch','streak'):    meas=lm;   ss=f'{lm:.2f}x{wm:.2f}mm'
-        else:                                  meas=amm2; ss=f'{amm2:.3f}mm²'
-
-        v = verdict(dtype, meas)
-        if v=='PASS': continue
-
-        out.append({'type':dtype,'label':LABELS.get(dtype,dtype),
-                    'x':int(x),'y':int(y),'w':int(bw),'h':int(bh),
-                    'area_mm2':round(amm2,3),'diameter_mm':round(dm,3),
-                    'length_mm':round(lm,3),'width_mm':round(wm,3),
-                    'size_str':ss,'verdict':v,
-                    'severity':'high' if v=='FAIL' else 'medium',
-                    'heat_score':round(mh,3),'contour':cnt})
-
-    out.sort(key=lambda d:d['heat_score'],reverse=True)
-    return out
+        defects.append({
+            'type':'smear','label':'Lem mực/vệt bẩn',
+            'x':int(x),'y':int(y),'w':int(bw),'h':int(bh),
+            'area_px':int(area),
+            'area_mm2':round(amm2,3) if amm2 else None,
+            'size_str':size_str,
+            'verdict':v,
+            'severity':'high' if v=='FAIL' else 'medium',
+        })
+    return defects
 
 
-def _classify(cnt,area,bw,bh,aspect,aw,real,dpi):
-    perim = cv2.arcLength(cnt,True)
-    circ  = 4*math.pi*area/perim**2 if perim>0 else 0
+# ── Step 9: Abnormal texture / noise ─────────────────────────────────────────
+def _step_detect_noise(gray, img, sensitivity, dpi, img_scale):
+    """
+    Detect abnormal texture = difference between local and smooth surface.
+    High-frequency noise that doesn't belong to normal print texture.
+    """
+    defects = []
+    h, w = gray.shape[:2]
 
-    if aspect>10 and max(bw,bh)>mm2px(2.0,dpi): return 'scratch'
-    if aspect>4  and max(bw,bh)>mm2px(1.5,dpi): return 'streak'
-    if circ>0.65 and bw<mm2px(3,dpi):            return 'hickey'
-    if circ>0.5  and bw<mm2px(1.5,dpi):          return 'dot'
-    if circ>0.35 and bw<mm2px(6,dpi):            return 'spot'
+    # Expected smooth surface = heavily blurred version
+    smooth = cv2.GaussianBlur(gray, (15,15), 0)
+    diff   = cv2.absdiff(gray, smooth)
 
-    x,y,w2,h2 = cv2.boundingRect(cnt)
-    ar=aw[y:y+h2,x:x+w2]; pr=real[y:y+h2,x:x+w2]
-    if ar.size==0 or pr.size==0: return 'anomaly'
+    # Adjust threshold by sensitivity
+    tex_thresh = max(8, int(TEXTURE_THRESH * (1 + (sensitivity-30)/100.0)))
+    _, th = cv2.threshold(diff, tex_thresh, 255, cv2.THRESH_BINARY)
 
-    am=float(np.mean(cv2.cvtColor(ar,cv2.COLOR_BGR2GRAY)))
-    pm=float(np.mean(cv2.cvtColor(pr,cv2.COLOR_BGR2GRAY)))
-    if pm>am+15: return 'missing_ink'
-    if pm<am-15: return 'extra_ink'
+    # Remove fine print texture (expected)
+    # Use opening with medium kernel to keep only large anomalies
+    km = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5))
+    th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  km)
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, km)
 
-    try:
-        al=cv2.Laplacian(cv2.cvtColor(ar,cv2.COLOR_BGR2GRAY),cv2.CV_64F).var()
-        pl=cv2.Laplacian(cv2.cvtColor(pr,cv2.COLOR_BGR2GRAY),cv2.CV_64F).var()
-        if pl<al*0.4: return 'blur'
-    except Exception: pass
+    total_noise = int(np.sum(th>0))
 
-    return 'anomaly' if area>=mm2px(0.15,dpi)**2 else None
+    # Find individual noise regions
+    min_noise_area = max(50, NOISE_AREA_LIMIT*0.1*(sensitivity/30.0))
+    contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  RENDER
-# ═══════════════════════════════════════════════════════════════════════════════
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_noise_area: continue
+        if area > h*w*0.15: continue
 
-def render_overlay(img, defects, text_def=[]):
-    """Color overlay only — no text labels."""
+        x,y,bw,bh = cv2.boundingRect(cnt)
+        a_real = area/(img_scale**2)
+        amm2   = a2mm2(a_real, dpi)
+        size_str = f'{amm2:.3f}mm²' if amm2 else f'{a_real:.0f}px²'
+        v = 'FAIL' if a_real > 200 else 'WARN'
+
+        defects.append({
+            'type':'noise','label':'Bất thường/nhiễu',
+            'x':int(x),'y':int(y),'w':int(bw),'h':int(bh),
+            'area_px':int(area),
+            'area_mm2':round(amm2,3) if amm2 else None,
+            'size_str':size_str,
+            'verdict':v,
+            'severity':'high' if v=='FAIL' else 'medium',
+        })
+
+    return defects, total_noise
+
+
+# ── Render outputs ────────────────────────────────────────────────────────────
+def render_overlay(img, defects):
+    """Color overlay — no text labels."""
     out = img.copy()
-    ih,iw = out.shape[:2]
-    for d in defects+text_def:
-        c = COLORS.get(d.get('type',''), (180,180,180))
-        if d.get('is_text'): c=(100,0,255)
+    ih, iw = out.shape[:2]
+    for d in defects:
+        c = DEFECT_COLORS.get(d['type'], (180,180,180))
         x=max(0,d['x']); y=max(0,d['y'])
         w=min(d['w'],iw-x); h=min(d['h'],ih-y)
         if w<=0 or h<=0: continue
-        ov=out.copy()
+        if d['type'] == 'blur':
+            # Full-image overlay for blur
+            ov = out.copy()
+            cv2.rectangle(ov,(0,0),(iw,ih),c,-1)
+            cv2.addWeighted(ov,0.15,out,0.85,0,out)
+            cv2.rectangle(out,(2,2),(iw-2,ih-2),c,3)
+            continue
+        ov = out.copy()
         cv2.rectangle(ov,(x,y),(x+w,y+h),c,-1)
-        a=0.55 if d.get('verdict')=='FAIL' else 0.38
-        cv2.addWeighted(ov,a,out,1-a,0,out)
-        cv2.rectangle(out,(x,y),(x+w,y+h),c,3 if d.get('verdict')=='FAIL' else 2)
+        alpha = 0.55 if d.get('verdict')=='FAIL' else 0.38
+        cv2.addWeighted(ov,alpha,out,1-alpha,0,out)
+        thick = 3 if d.get('verdict')=='FAIL' else 2
+        cv2.rectangle(out,(x,y),(x+w,y+h),c,thick)
     return out
 
 
-def render_dotmap(shape, defects, heat, text_def=[]):
+def render_dotmap(shape, defects):
     """
-    Pure black background.
-    White = defect location.
-    QC scans for white spots to know where to re-inspect.
+    Black background. White = defect location.
+    QC sees white spots → knows where to re-inspect.
     """
-    ih,iw = shape[:2]
-    out = np.zeros((ih,iw,3),dtype=np.uint8)
-
-    # Heat → white mask
-    hh,hw = heat.shape[:2]
-    rh=min(hh,ih); rw=min(hw,iw)
-    if rh>0 and rw>0:
-        hr = cv2.resize(heat[:rh,:rw],(rw,rh))
-        _,mask = cv2.threshold((hr*255).astype(np.uint8),15,255,cv2.THRESH_BINARY)
-        k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5))
-        mask = cv2.dilate(mask,k5)
-        out[:rh,:rw][mask>0] = 255
-
-    # Guarantee each defect bbox is white
-    for d in defects+text_def:
+    ih, iw = shape[:2]
+    out = np.zeros((ih,iw,3), dtype=np.uint8)
+    for d in defects:
+        if d['type'] == 'blur': continue  # blur is global, skip on dotmap
         x=max(0,d['x']); y=max(0,d['y'])
-        w=min(d.get('w',8),iw-x); h=min(d.get('h',8),ih-y)
+        w=min(d['w'],iw-x); h=min(d['h'],ih-y)
         if w>0 and h>0:
-            out[y:y+h,x:x+w] = 255
-
+            out[y:y+h, x:x+w] = 255
     return out
 
-# ── Gemini text check ─────────────────────────────────────────────────────────
-def text_check(aw, real):
-    if not GEMINI_API_KEY: return []
-    h,w = aw.shape[:2]
-    prompt=(
-        f"So sánh Ảnh 1 (AW gốc) và Ảnh 2 (tờ in, {w}x{h}px). "
-        "Chỉ kiểm tra VĂN BẢN: dấu thanh tiếng Việt, dấu câu, ký tự sai/thiếu. "
-        'JSON: {"text_defects":[{"type":"wrong_diacritic|missing_punct|wrong_char",'
-        '"label":"tên lỗi","detail":"mô tả","x":0,"y":0,"w":40,"h":25}]}'
-    )
+
+# ── Gemini enhancement (optional) ─────────────────────────────────────────────
+def gemini_enhance(img, defects):
+    """Use Gemini to add context to detected defects."""
+    if not GEMINI_API_KEY or not defects: return None
+    lines = "\n".join([f"- {d['label']} tại ({d['x']},{d['y']}) size={d['size_str']}"
+                       for d in defects[:10]])
     try:
-        r=requests.post(
+        r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
             json={"contents":[{"parts":[
-                {"inline_data":{"mime_type":"image/jpeg","data":j2b64(aw)}},
-                {"inline_data":{"mime_type":"image/jpeg","data":j2b64(real)}},
-                {"text":prompt}
-            ]}],"generationConfig":{"temperature":0.05,"maxOutputTokens":1500}},
-            timeout=45)
-        raw=(r.json().get('candidates',[{}])[0]
-             .get('content',{}).get('parts',[{}])[0].get('text',''))
-        return json.loads(raw.replace('```json','').replace('```','').strip()).get('text_defects',[])
-    except Exception as e:
-        print(f'Gemini text err:{e}'); return []
-
-def ai_summary(defects):
-    if not GEMINI_API_KEY or not defects: return None
-    lines="\n".join([f"- #{i+1}: {d.get('label','?')} {d.get('size_str','')} [{d.get('verdict','?')}]"
-                     for i,d in enumerate(defects)])
-    try:
-        r=requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
-            json={"contents":[{"parts":[{"text":
-                f"QC in ấn. {len(defects)} lỗi:\n{lines}\n"
-                "Báo cáo tiếng Việt ≤80 từ."}]}],
-                "generationConfig":{"temperature":0.2,"maxOutputTokens":200}},
+                {"inline_data":{"mime_type":"image/jpeg","data":j2b64(img)}},
+                {"text": f"Ảnh tờ in có các lỗi sau:\n{lines}\n"
+                         "Đánh giá chất lượng tờ in, lỗi nghiêm trọng nhất, khuyến nghị. Tiếng Việt ≤80 từ."}
+            ]}],"generationConfig":{"temperature":0.1,"maxOutputTokens":200}},
             timeout=30)
         return (r.json().get('candidates',[{}])[0]
                 .get('content',{}).get('parts',[{}])[0].get('text',''))
     except: return None
 
-# ── API endpoints ─────────────────────────────────────────────────────────────
-@app.route('/api/get_aw_info', methods=['POST','OPTIONS'])
-def api_dpi():
-    if request.method=='OPTIONS': return '',204
-    d=request.get_json()
-    info=get_dpi(d.get('fileData',''),d.get('fileType','image'))
-    return jsonify({k:v for k,v in info.items() if k!='img_cv2'})
 
-
+# ── API ───────────────────────────────────────────────────────────────────────
 @app.route('/api/analyze', methods=['POST','OPTIONS'])
 def analyze():
     if request.method=='OPTIONS': return '',204
-    data=request.get_json()
+    data = request.get_json()
     if not data: return jsonify({'error':'No data'}),400
 
-    aw_b64    = data.get('awImage')
-    pr_b64    = data.get('printImage')
-    aw_fb64   = data.get('awFileData')
-    aw_ftype  = data.get('awFileType','image')
-    sens      = int(data.get('sensitivity',30))
-    chk_txt   = data.get('checkText',True)
-    man_dpi   = data.get('manualDpi',None)
+    img_b64    = data.get('printImage') or data.get('awImage')
+    sensitivity= int(data.get('sensitivity',30))
+    man_dpi    = data.get('manualDpi',None)
+    img_b64_raw= data.get('awFileData') or data.get('imageFileData')
+    ftype      = data.get('awFileType','image')
 
-    if not aw_b64 or not pr_b64:
-        return jsonify({'error':'Thiếu ảnh'}),400
+    if not img_b64: return jsonify({'error':'Thiếu ảnh'}),400
 
     try:
-        # DPI
-        aw_info={}
-        if aw_fb64: aw_info=get_dpi(aw_fb64,aw_ftype)
-        dpi = float(man_dpi) if man_dpi else (aw_info.get('dpi') or 150.0)
+        # Load image
+        img = b64_to_cv2(img_b64)
+        if img is None: return jsonify({'error':'Không đọc được ảnh'}),400
 
-        # Load
-        aw = b64_to_cv2(aw_b64)
-        pr = b64_to_cv2(pr_b64)
-        if aw is None or pr is None:
-            return jsonify({'error':'Không đọc được ảnh'}),400
-        print(f'Load: AW={aw.shape} Real={pr.shape} DPI={dpi} Sens={sens}')
+        # DPI (optional)
+        dpi = float(man_dpi) if man_dpi else None
+        if not dpi and img_b64_raw:
+            dpi = get_dpi(img_b64_raw, ftype)
+        print(f'Analyze: shape={img.shape} DPI={dpi} Sens={sensitivity}')
 
-        # ── REGISTER ──────────────────────────────────────────────────────────
-        warped, method, quality, reg_info = register(aw, pr)
-        print(f'Register: method={method} quality={quality:.2f} info={reg_info}')
+        # Run pipeline
+        result, img_resized = run_pipeline(img, sensitivity, dpi)
+        defects = result['defects']
+        print(f'Found: {len(defects)} defects | blur={result["blur_detected"]} '
+              f'spots={result["spot_count"]} scratches={result["scratch_detected"]}')
 
-        # ── NORMALIZE ─────────────────────────────────────────────────────────
-        ag, rg, aw_n, real_n = normalize(aw, warped)
+        # Render
+        col_img = render_overlay(img_resized, defects)
+        dot_img = render_dotmap(img_resized.shape, defects)
 
-        # ── DIFF + THRESHOLD ──────────────────────────────────────────────────
-        heat, binary, ssim_score = diff_and_threshold(ag, rg, aw_n, real_n, sens)
-        n_diff = int(np.sum(binary>0))
-        total  = ag.shape[0]*ag.shape[1]
-        diff_pct = n_diff/total*100
-        print(f'Diff: {n_diff}px/{total}px={diff_pct:.1f}% SSIM={ssim_score:.3f}')
+        # AI summary
+        ai_sum = gemini_enhance(img_resized, defects) if defects else None
 
-        # ── DETECT ────────────────────────────────────────────────────────────
-        defects = detect(binary, heat, aw_n, real_n, dpi)
-        print(f'Defects: {len(defects)}')
+        # Result
+        fail_c = sum(1 for d in defects if d.get('verdict')=='FAIL')
+        warn_c = sum(1 for d in defects if d.get('verdict')=='WARN')
+        overall = 'NG' if fail_c>0 or result['blur_detected'] else (
+                  'WARN' if warn_c>0 or result['scratch_detected'] else 'OK')
 
-        # ── TEXT CHECK ────────────────────────────────────────────────────────
-        txt_def = []
-        if chk_txt and GEMINI_API_KEY:
-            txt_def = text_check(aw_n, real_n)
-            for td in txt_def:
-                td['verdict']='FAIL'; td['size_str']=td.get('detail','')
-
-        # ── RENDER ────────────────────────────────────────────────────────────
-        col_img = render_overlay(real_n, defects, txt_def)
-        dot_img = render_dotmap(real_n.shape, defects, heat, txt_def)
-
-        all_d = defects+[dict(d,severity='high') for d in txt_def]
-        summ  = ai_summary(all_d) if all_d else None
-
-        phys_out = [{k:v for k,v in d.items() if k!='contour'} for d in defects]
-        txt_out  = [dict(d,is_text=True) for d in txt_def]
-
-        fail_c = sum(1 for d in all_d if d.get('verdict')=='FAIL')
-        warn_c = sum(1 for d in all_d if d.get('verdict')=='WARN')
-        v = 'FAIL' if fail_c>0 else ('WARN' if warn_c>0 else 'PASS')
+        clean = [{k:v for k,v in d.items()} for d in defects]
 
         return jsonify({
-            'verdict':v, 'defect_count':len(all_d),
-            'fail_count':fail_c, 'warn_count':warn_c,
-            'physical_count':len(defects), 'text_count':len(txt_def),
-            'defects':phys_out+txt_out,
+            # Main result
+            'result':        overall,           # "OK" / "WARN" / "NG"
+            'verdict':       'FAIL' if overall=='NG' else ('WARN' if overall=='WARN' else 'PASS'),
+            'defect_count':  len(defects),
+            'fail_count':    fail_c,
+            'warn_count':    warn_c,
+            # Detail
+            'spot_count':    result['spot_count'],
+            'blur':          result['blur_detected'],
+            'scratch':       result['scratch_detected'],
+            'noise_area':    result['noise_area_px'],
+            'laplacian_var': result['laplacian_var'],
+            'defects':       clean,
+            # Images
             'result_color':  cv2_to_b64(col_img),
             'result_dotmap': cv2_to_b64(dot_img),
-            'ai_summary':    summ,
-            'dpi_aw':        round(dpi,1),
-            'aw_size':       f"{aw_info.get('width_mm','?')}x{aw_info.get('height_mm','?')}mm",
-            'dpi_source':    aw_info.get('source','fallback'),
-            'align_method':  method,
-            'reg_quality':   round(quality,3),
-            'ssim_score':    round(ssim_score,3),
-            'diff_pct':      round(diff_pct,1),
-            'reg_debug':     reg_info,
+            # Meta
+            'ai_summary':    ai_sum,
+            'dpi_used':      round(dpi,1) if dpi else None,
+            'image_size':    f'{img_resized.shape[1]}x{img_resized.shape[0]}',
+            'pipeline':      result['pipeline_steps'],
         })
 
     except Exception as e:
         import traceback
         return jsonify({'error':str(e),'trace':traceback.format_exc()}),500
+
+
+# Keep DPI endpoint for compatibility
+@app.route('/api/get_aw_info', methods=['POST','OPTIONS'])
+def api_dpi():
+    if request.method=='OPTIONS': return '',204
+    d = request.get_json()
+    b64 = d.get('fileData','')
+    dpi = get_dpi(b64, d.get('fileType','image'))
+    return jsonify({'dpi':dpi,'source':'exif' if dpi else 'not_found'})
 
 
 @app.route('/', defaults={'path':''})
@@ -692,5 +583,6 @@ def serve(path):
 
 if __name__=='__main__':
     port=int(os.environ.get('PORT',8080))
-    print('QC Inspector — REGISTER→NORMALIZE→DIFF→DETECT')
+    print('QC Defect Inspector — No AW required')
+    print('Detects: spot/dot/hickey/blur/smear/scratch/dirt/noise')
     app.run(host='0.0.0.0',port=port,debug=False)
